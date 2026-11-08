@@ -20,7 +20,7 @@
   <!-- ВХОД И ВЫБОР НИКА -->
   <div id="login-overlay">
     <div class="login-card">
-      <span class="login-badge">Мультиплеер • 3D • Бесконечный мир СНТ</span>
+      <span class="login-badge">Мультиплеер • 3D от 1-го лица • Бесконечный мир СНТ</span>
       <h1>🌲 Проект Дача 3D</h1>
       <p class="login-sub">
         Бесконечный русский лес с дорогами и садоводствами (СНТ). Покупай участки, руби деревья, собирай ягоды с кустов, перерабатывай ресурсы, строй дома и выращивай урожай!
@@ -46,7 +46,7 @@
       <div class="starter-features">
         <div>💰 <b>Стартовый капитал:</b> 500 ₽ (хватит на покупку 1-го участка за 300 ₽ и семена/еду на первое время).</div>
         <div>🍓 <b>Выживание:</b> Собирай лесные ягоды с кустов и ешь урожай, чтобы поддерживать сытость.</div>
-        <div>🏡 <b>Развитие:</b> Перерабатывай брёвна и камень в доски, брус и кирпич, строй дачи, веди огород, торгуй в Магазине и на Базаре и скупай соседние участки!</div>
+        <div>🏪 <b>Магазин и Базар:</b> Иди пешком ко въезду в любое СНТ (жёлтая и оранжевая точки на радаре), чтобы торговать!</div>
       </div>
 
       <button class="btn-start" id="start-game-btn">Отправиться в садоводство ▶</button>
@@ -56,6 +56,7 @@
   <!-- ИГРОВОЙ ИНТЕРФЕЙС (HUD) -->
   <div id="hud">
     <div id="crosshair"></div>
+
     <div class="hud-top-left">
       <div class="player-card">
         <div class="player-header">
@@ -105,14 +106,14 @@
       <div class="minimap-wrap">
         <canvas id="minimap-canvas" width="180" height="180"></canvas>
         <div class="minimap-caption" id="minimap-coords">X: 0 • Z: 0 • Высота: 0.0м</div>
+        <div style="font-size:10.5px;color:#dce775;margin-top:2px;">🟨 Магазин • 🟧 Базар (у въезда в СНТ)</div>
       </div>
 
       <div class="action-buttons">
+        <button class="hud-btn" id="btn-inv"><kbd>I</kbd> 🎒 Инвентарь</button>
         <button class="hud-btn" id="btn-eat"><kbd>F</kbd> 🍓 Поесть</button>
         <button class="hud-btn" id="btn-craft"><kbd>C</kbd> 🪚 Переработка / Крафт</button>
         <button class="hud-btn" id="btn-build"><kbd>B</kbd> 🏡 Стройка и Огород</button>
-        <button class="hud-btn" id="btn-shop"><kbd>M</kbd> 🏪 Магазин</button>
-        <button class="hud-btn" id="btn-bazaar"><kbd>N</kbd> ⚖️ Базар (Продажа)</button>
       </div>
     </div>
 
@@ -123,7 +124,7 @@
 
     <div id="interact-prompt">
       <span id="interact-main">Нажмите [E] для действия</span>
-      <span class="sub-hint" id="interact-sub">Подойдите ближе и нажмите клавишу E или кликните сюда</span>
+      <span class="sub-hint" id="interact-sub">Подойдите ближе и нажмите клавишу E или ЛКМ</span>
     </div>
 
     <!-- ЧАТ -->
@@ -135,11 +136,10 @@
       </div>
     </div>
 
-    <!-- ИНВЕНТАРЬ -->
+    <!-- ПОДСКАЗКА УПРАВЛЕНИЯ ВНИЗУ -->
     <div class="hud-bottom">
-      <div id="inventory-bar"></div>
       <div class="controls-hint">
-        <b>WASD / Стрелки</b> — Ходьба • <b>Shift</b> — Бег • <b>Пробел</b> — Прыжок • <b>Мышь (клик по экрану)</b> — Обзор от 1-го лица • <b>V</b> — Смена вида • <b>E / ЛКМ</b> — Добывать / Купить / Огород
+        <b>WASD</b> — Ходьба • <b>Shift</b> — Бег • <b>Пробел</b> — Прыжок • <b>I / Tab</b> — Инвентарь • <b>C</b> — Крафт • <b>B</b> — Стройка • <b>E / ЛКМ</b> — Действие (Магазин и Базар — пешком у входа в СНТ)
       </div>
     </div>
   </div>
