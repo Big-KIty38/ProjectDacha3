@@ -29,10 +29,6 @@ export function hash2D(x, z, salt = 0) {
   return (h >>> 0) / 4294967296;
 }
 
-export function getHighwayX(z) {
-  return Math.sin(z * 0.007) * 22 + Math.cos(z * 0.003) * 14;
-}
-
 // Неровный рельеф с плавными возвышенностями и низменностями
 export function getTerrainHeight(x, z) {
   const n1 = Math.sin(x * 0.013 + 0.7) * Math.cos(z * 0.013 - 0.4) * 3.4;
@@ -67,35 +63,40 @@ export function getSurfaceType(x, z) {
   const lx = x - centerX;
   const lz = z - centerZ;
 
-  // 1. Широкое лесное шоссе (14 м шириной)
-  if (cx === 0 && Math.abs(x - getHighwayX(z)) < 7.2) {
-    return "asphalt";
-  }
-
-  // 2. Поперечный лесной тракт, ведущий к садоводствам (ширина 10.5 м)
-  const roadZ = 76 + Math.sin(x * 0.016) * 4.5;
-  if (Math.abs(lz - roadZ) < 5.4) {
-    return "dirt_road";
-  }
-
-  // 3. Подъездная дорога к воротам СНТ (ширина 10 м)
-  if (lz >= -8 && lz <= roadZ + 3 && Math.abs(lx) < 5.2) {
-    return "dirt_road";
-  }
-
-  // 4. Широкая центральная улица СНТ вдоль рядов дач (ширина 11 м, длина 166 м)
-  if (Math.abs(lz) < 5.6 && Math.abs(lx) < 84) {
-    return "dirt_road";
-  }
-
-  // 5. Крупные дачные участки 1:1 (2 ряда по 4 участка, каждый 32x34 м)
-  if (Math.abs(lx) >= 6 && Math.abs(lx) <= 78 && ((lz >= 6.5 && lz <= 41.5) || (lz >= -41.5 && lz <= -6.5))) {
+  // 1. Крупные дачные участки 1:1 (2 ряда по 4 участка, каждый 32x34 м) — только ровный зелёный газон!
+  const inPlotX =
+    (Math.abs(lx - -60) <= 16) ||
+    (Math.abs(lx - -24) <= 16) ||
+    (Math.abs(lx - 24) <= 16) ||
+    (Math.abs(lx - 60) <= 16);
+  const inPlotZ = (Math.abs(lz - -24) <= 17) || (Math.abs(lz - 24) <= 17);
+  if (inPlotX && inPlotZ) {
     return "lawn";
   }
 
-  // 6. Торговая площадь у Магазина и Базара перед въездом в СНТ
-  if (lz >= 45 && lz <= 68 && Math.abs(lx) <= 34) {
+  // 2. Широкая центральная грунтовая улица СНТ между двумя рядами участков (lz около 0)
+  if (Math.abs(lz) < 6.8 && Math.abs(lx) < 82) {
+    return "dirt_road";
+  }
+
+  // 3. Подъездная грунтовая дорога от лесного шоссе через ворота СНТ к центральной улице (lx около 0)
+  const highwayLz = 108 + Math.sin(x * 0.014) * 5.0;
+  if (lz >= -6.8 && lz <= highwayLz && Math.abs(lx) < 6.5) {
+    return "dirt_road";
+  }
+
+  // 4. Торговая площадка у Магазина и Базара перед въездом в СНТ (lz от 48 до 66)
+  if (lz >= 48 && lz <= 66 && Math.abs(lx) <= 28) {
     return "plaza";
+  }
+
+  // 5. Асфальтовое лесное шоссе проходит снаружи СНТ (на lz ≈ 108 и по краю чанка lx ≈ -132), никогда не заходя на участки!
+  if (Math.abs(lz - highwayLz) < 6.8) {
+    return "asphalt";
+  }
+  const sideHighwayLx = -132 + Math.sin(z * 0.012) * 5.0;
+  if (Math.abs(lx - sideHighwayLx) < 6.8) {
+    return "asphalt";
   }
 
   return "forest";
@@ -111,15 +112,15 @@ export function getChunkLayout(cx, cz) {
       ? "СНТ «Лесная Поляна»"
       : `СНТ «${SNT_TITLES[idx]}${regionNum > 1 ? "-" + regionNum : ""}»`;
 
-  const archPos = { x: centerX, z: centerZ + 56 };
-  const shopPos = { x: centerX - 18.5, z: centerZ + 54 };
-  const bazaarPos = { x: centerX + 18.5, z: centerZ + 54 };
+  const archPos = { x: centerX, z: centerZ + 46 };
+  const shopPos = { x: centerX - 18.5, z: centerZ + 56 };
+  const bazaarPos = { x: centerX + 18.5, z: centerZ + 56 };
 
   // 8 реалистичных больших участков по 32x34 м (по 4 с каждой стороны широкой улицы)
   const plotOffsetsX = [-60, -24, 24, 60];
   const plotRowsZ = [
-    { lz: -24, signLz: -6.4, signRot: 0 },
-    { lz: 24, signLz: 6.4, signRot: Math.PI }
+    { lz: -24, signLz: -6.8, signRot: 0 },
+    { lz: 24, signLz: 6.8, signRot: Math.PI }
   ];
 
   const plots = [];
@@ -179,8 +180,8 @@ export function getChunkLayout(cx, cz) {
     }
   }
 
-  // B) Густой плотный лес вокруг садоводств и дорог (290 деревьев, кустов и камней на чанк!)
-  for (let i = 0; i < 290; i++) {
+  // B) Густой плотный лес вокруг садоводств и дорог (310 деревьев, кустов и камней на чанк!)
+  for (let i = 0; i < 310; i++) {
     const lx = (hash2D(cx * 300 + i, cz, 601) - 0.5) * (CHUNK_SIZE - 6);
     const lz = (hash2D(cx, cz * 300 + i, 702) - 0.5) * (CHUNK_SIZE - 6);
     const wx = centerX + lx;

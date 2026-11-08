@@ -255,7 +255,7 @@ export function makeFloatingBadge(lines, scaleX = 3.2, scaleY = 1.0, opts = {}) 
 }
 
 export function createTerrainChunkMesh(cx, cz) {
-  const segs = 44;
+  const segs = 90;
   const geo = new THREE.PlaneGeometry(CHUNK_SIZE, CHUNK_SIZE, segs, segs);
   geo.rotateX(-Math.PI / 2);
 
