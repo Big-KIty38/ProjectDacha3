@@ -144,6 +144,70 @@ scene.add(structuresRoot);
 const structureMeshes = new Map();
 const loadedChunks = new Map();
 
+
+function lockPointerSafe() {
+  if (
+    state.started &&
+    modalBackdrop.style.display !== "flex" &&
+    document.activeElement !== document.getElementById("chat-input") &&
+    document.pointerLockElement !== canvas
+  ) {
+    try { canvas.requestPointerLock(); } catch {}
+  }
+}
+
+function resolveCollisions(nx, nz) {
+  const playerRadius = 0.42;
+  for (const ch of loadedChunks.values()) {
+    if (Math.abs(nx - ch.centerX) > CHUNK_SIZE * 0.75 || Math.abs(nz - ch.centerZ) > CHUNK_SIZE * 0.75) continue;
+    for (const [, rm] of ch.resMeshes.entries()) {
+      const res = rm.userData.resource;
+      let colR = 0;
+      if (res.kind === "birch" || res.kind === "pine") colR = 0.55 * (res.scale || 1);
+      else if (res.kind === "rock") colR = 1.15 * (res.scale || 1);
+      else continue;
+      const minDist = playerRadius + colR;
+      const dx = nx - res.x;
+      const dz = nz - res.z;
+      const distSq = dx * dx + dz * dz;
+      if (distSq < minDist * minDist && distSq > 0.0001) {
+        const dist = Math.sqrt(distSq);
+        const overlap = minDist - dist;
+        nx += (dx / dist) * overlap;
+        nz += (dz / dist) * overlap;
+      }
+    }
+    for (const pav of [ch.layout.shopPos, ch.layout.bazaarPos]) {
+      const dx = nx - pav.x;
+      const dz = nz - pav.z;
+      if (Math.abs(dx) < 3.5 && Math.abs(dz) < 2.6) {
+        const penX = 3.5 - Math.abs(dx);
+        const penZ = 2.6 - Math.abs(dz);
+        if (penX < penZ) nx += dx >= 0 ? penX : -penX;
+        else nz += dz >= 0 ? penZ : -penZ;
+      }
+    }
+  }
+  for (const s of Object.values(state.structures)) {
+    if (s.type === "bed" || s.type === "greenhouse") continue;
+    let r = 1.2;
+    if (s.type === "shed" || s.type === "banya" || s.type === "gazebo") r = 2.1;
+    else if (s.type === "house_wood" || s.type === "house_terem" || s.type === "house_brick") r = 3.1;
+    else if (s.type === "fence") r = 0.55;
+    const minDist = playerRadius + r;
+    const dx = nx - s.x;
+    const dz = nz - s.z;
+    const distSq = dx * dx + dz * dz;
+    if (distSq < minDist * minDist && distSq > 0.0001) {
+      const dist = Math.sqrt(distSq);
+      const overlap = minDist - dist;
+      nx += (dx / dist) * overlap;
+      nz += (dz / dist) * overlap;
+    }
+  }
+  return { x: nx, z: nz };
+}
+
 function getNextPlotPrice() {
   const myPlots = Object.values(state.plots).filter((p) => p.ownerKey === state.playerKey).length;
   return 300 + myPlots * 150;
@@ -703,9 +767,56 @@ const modalTitle = document.getElementById("modal-title");
 const modalSubtitle = document.getElementById("modal-subtitle");
 const modalBody = document.getElementById("modal-body");
 
-function closeModal() { modalBackdrop.style.display = "none"; }
-document.getElementById("modal-close").addEventListener("click", closeModal);
-modalBackdrop.addEventListener("click", (e) => { if (e.target === modalBackdrop) closeModal(); });
+function closeModal(restoreLock = true) {
+  modalBackdrop.style.display = "none";
+  if (restoreLock) lockPointerSafe();
+}
+document.getElementById("modal-close").addEventListener("click", () => closeModal(true));
+modalBackdrop.addEventListener("click", (e) => { if (e.target === modalBackdrop) closeModal(true); });
+
+function openInventoryModal() {
+  if (modalBackdrop.style.display === "flex" && modalTitle.textContent.startsWith("🎒")) {
+    closeModal(true);
+    return;
+  }
+  modalTitle.textContent = `🎒 Инвентарь дачника (Наличные: ${Math.round(state.money)} ₽)`;
+  modalSubtitle.textContent = "Ваши добытые ресурсы, стройматериалы, семена и запасы еды:";
+  modalBody.innerHTML = "";
+  let hasAny = false;
+  Object.entries(ITEMS).forEach(([key, info]) => {
+    const cnt = state.inv[key] || 0;
+    if (cnt <= 0) return;
+    hasAny = true;
+    const card = document.createElement("div");
+    card.className = "card-item";
+    card.innerHTML = `
+      <div>
+        <div class="card-title">${info.icon} ${info.name}: <span style="color:#ffd54f">${cnt} шт.</span></div>
+        <div class="card-desc">${info.food > 0 ? `Восстанавливает +${info.food}% сытости.` : "Ресурс для строительства, огорода, крафта или продажи на Базаре."}</div>
+      </div>
+      ${info.food > 0 ? `<button class="card-btn">😋 Съесть (+${info.food}% сытости)</button>` : ""}
+    `;
+    if (info.food > 0) {
+      card.querySelector("button").addEventListener("click", () => {
+        if ((state.inv[key] || 0) < 1) return;
+        state.inv[key]--;
+        state.hunger = Math.min(100, state.hunger + info.food);
+        state.energy = Math.min(100, state.energy + Math.round(info.food * 0.6));
+        playSfx("pick");
+        showToast(`😋 Съедено: ${info.name} (+${info.food}% сытости)`);
+        updateHudUI();
+        saveLocalProfile();
+        openInventoryModal();
+      });
+    }
+    modalBody.appendChild(card);
+  });
+  if (!hasAny) {
+    modalBody.innerHTML = `<div style="grid-column:1/-1;padding:18px;text-align:center;color:#c5e1a5;">Инвентарь пока пуст — рубите деревья, собирайте ягоды с кустов [E] или сходите пешком в Магазин у входа в СНТ!</div>`;
+  }
+  if (document.pointerLockElement) document.exitPointerLock();
+  modalBackdrop.style.display = "flex";
+}
 
 function formatCostObject(cost) {
   return Object.entries(cost)
@@ -942,7 +1053,9 @@ function enterBuildMode(buildingDef) {
   buildSelectedName.textContent = buildingDef.name;
   buildBanner.style.display = "block";
   while (buildGhostGroup.children.length > 0) buildGhostGroup.remove(buildGhostGroup.children[0]);
-  const ghost = createStructureMesh({ id: "ghost", type: buildingDef.type, x: 0, z: 0, rot: state.buildRot });
+  const ghost = createStructureMesh({ id: "ghost", type: buildingDef.type, x: 0, z: 0, rot: 0 });
+  ghost.position.set(0, 0, 0);
+  ghost.rotation.set(0, 0, 0);
   ghost.traverse((child) => {
     if (child.isMesh) {
       child.material = child.material.clone();
@@ -951,7 +1064,11 @@ function enterBuildMode(buildingDef) {
     }
   });
   buildGhostGroup.add(ghost);
+  const gPos = getBuildPreviewCoords();
+  buildGhostGroup.position.set(gPos.x, gPos.y, gPos.z);
+  buildGhostGroup.rotation.y = state.buildRot;
   buildGhostGroup.visible = true;
+  lockPointerSafe();
 }
 
 function exitBuildMode() {
@@ -961,10 +1078,10 @@ function exitBuildMode() {
 }
 
 function getBuildPreviewCoords() {
-  const dist = 5.5;
   state.ry = state.camYaw;
-  const gx = state.x - Math.sin(state.ry) * dist;
-  const gz = state.z - Math.cos(state.ry) * dist;
+  const dist = Math.max(3.8, Math.min(9.5, 6.2 - state.camPitch * 3.0));
+  const gx = state.x - Math.sin(state.camYaw) * dist;
+  const gz = state.z - Math.cos(state.camYaw) * dist;
   return { x: gx, y: getTerrainHeight(gx, gz), z: gz };
 }
 
@@ -1046,11 +1163,10 @@ window.addEventListener("keydown", (e) => {
   if (k === "KeyE") {
     if (state.buildMode) confirmPlaceBuilding();
     else executeInteraction(findNearestInteractable());
-  } else if (k === "KeyF") eatFoodAction();
+  } else if (k === "KeyI" || k === "Tab") { e.preventDefault(); openInventoryModal(); }
+  else if (k === "KeyF") eatFoodAction();
   else if (k === "KeyC") openCraftModal();
   else if (k === "KeyB") { if (state.buildMode) exitBuildMode(); else openBuildModal(); }
-  else if (k === "KeyM") openShopModal();
-  else if (k === "KeyN") openBazaarModal();
   else if (k === "KeyR" && state.buildMode) state.buildRot = (state.buildRot + Math.PI / 2) % (Math.PI * 2);
   else if (k === "KeyX") demolishNearestStructure();
   else if (k === "KeyV") {
@@ -1059,7 +1175,7 @@ window.addEventListener("keydown", (e) => {
     fpHand.visible = state.firstPerson;
     showToast(state.firstPerson ? "👁️ Вид от первого лица" : "🎥 Вид от третьего лица");
   }
-  else if (k === "Escape") { closeModal(); exitBuildMode(); }
+  else if (k === "Escape") { closeModal(false); exitBuildMode(); }
   else if (k === "Enter") document.getElementById("chat-input").focus();
 });
 window.addEventListener("keyup", (e) => { keys[e.code] = false; });
@@ -1069,7 +1185,9 @@ let dragMoved = false;
 let lastMouseX = 0;
 let lastMouseY = 0;
 
+let pointerLockedBeforeClick = false;
 canvas.addEventListener("mousedown", (e) => {
+  pointerLockedBeforeClick = document.pointerLockElement === canvas;
   if (state.started && modalBackdrop.style.display !== "flex" && document.pointerLockElement !== canvas) {
     try { canvas.requestPointerLock(); } catch {}
   }
@@ -1096,7 +1214,7 @@ window.addEventListener("mousemove", (e) => {
   state.ry = state.camYaw;
 });
 window.addEventListener("mouseup", (e) => {
-  if (!dragMoved && state.started && e.button === 0) {
+  if (pointerLockedBeforeClick && !dragMoved && state.started && e.button === 0) {
     if (state.buildMode) confirmPlaceBuilding();
     else executeInteraction(findNearestInteractable());
   }
@@ -1110,11 +1228,10 @@ window.addEventListener("resize", () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-document.getElementById("btn-eat").addEventListener("click", eatFoodAction);
+document.getElementById("btn-inv").addEventListener("click", openInventoryModal);
+document.getElementById("btn-eat").addEventListener("click", () => { eatFoodAction(); lockPointerSafe(); });
 document.getElementById("btn-craft").addEventListener("click", openCraftModal);
 document.getElementById("btn-build").addEventListener("click", openBuildModal);
-document.getElementById("btn-shop").addEventListener("click", openShopModal);
-document.getElementById("btn-bazaar").addEventListener("click", openBazaarModal);
 document.getElementById("interact-prompt").addEventListener("click", () => executeInteraction(findNearestInteractable()));
 
 function appendChatLine(msg) {
@@ -1172,27 +1289,7 @@ function updateHudUI() {
   if (state.tools.watering_can) toolsEl.innerHTML += `<span class="tool-chip">🚿 Садовая лейка</span>`;
   if (!state.tools.axe && !state.tools.watering_can) toolsEl.innerHTML = `<span class="tool-chip">✋ Ручной сбор</span>`;
 
-  const invBar = document.getElementById("inventory-bar");
-  invBar.innerHTML = "";
-  Object.entries(ITEMS).forEach(([key, info]) => {
-    const cnt = state.inv[key] || 0;
-    if (cnt <= 0 && !["wood", "branch", "stone", "berry", "plank"].includes(key)) return;
-    const slot = document.createElement("div");
-    slot.className = "inv-slot";
-    slot.title = info.food ? `${info.name} (Кликните, чтобы съесть: +${info.food}% сытости)` : info.name;
-    slot.innerHTML = `<span>${info.icon}</span><span>${info.name}</span><span class="cnt">${cnt}</span>`;
-    if (info.food && cnt > 0) {
-      slot.addEventListener("click", () => {
-        state.inv[key]--;
-        state.hunger = Math.min(100, state.hunger + info.food);
-        playSfx("pick");
-        showToast(`😋 Съедено: ${info.name} (+${info.food}% сытости)`);
-        updateHudUI();
-        saveLocalProfile();
-      });
-    }
-    invBar.appendChild(slot);
-  });
+
 
   updateOnlineListUI();
 }
@@ -1329,6 +1426,7 @@ function startGame() {
   ensureChunksAroundPlayer();
   updateHudUI();
   initMultiplayerNetwork();
+  lockPointerSafe();
 
   appendChatLine({
     sender: "СНТ-Инфо",
@@ -1388,9 +1486,10 @@ function animate(now) {
       const cosY = Math.cos(state.camYaw);
       const vx = (-sinY * fwd + cosY * right) * baseSpeed;
       const vz = (-cosY * fwd - sinY * right) * baseSpeed;
-      state.x += vx * dt;
-      state.z += vz * dt;
-      state.ry = Math.atan2(-vx, -vz);
+      const nextPos = resolveCollisions(state.x + vx * dt, state.z + vz * dt);
+      state.x = nextPos.x;
+      state.z = nextPos.z;
+      state.ry = state.firstPerson ? state.camYaw : Math.atan2(-vx, -vz);
 
       if (sprinting) state.energy = Math.max(0, state.energy - dt * 4.5);
       state.hunger = Math.max(0, state.hunger - dt * 0.28);
