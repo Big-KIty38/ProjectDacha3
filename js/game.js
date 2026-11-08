@@ -1,6 +1,7 @@
 import * as THREE from "three";
-import { generateSecretKey, getPublicKey, finalizeEvent } from "nostr-tools/pure";
-import { CHUNK_SIZE, getTerrainHeight, getChunkLayout } from "./world.js";
+import { Peer } from "peerjs";
+import mqtt from "mqtt";
+import { CHUNK_SIZE, getTerrainHeight, getChunkLayout } from "./world.js?v=4";
 import {
   ITEMS,
   CROPS,
@@ -9,7 +10,7 @@ import {
   SHOP_GOODS,
   BAZAAR_PRICES,
   playSfx
-} from "./data.js";
+} from "./data.js?v=4";
 import {
   createTerrainChunkMesh,
   createResourceMesh,
@@ -21,7 +22,7 @@ import {
   createPlayerMesh,
   createFirstPersonViewmodel,
   animatePlayerMesh
-} from "./models.js";
+} from "./models.js?v=4";
 
 const savedProfile = JSON.parse(localStorage.getItem("project_dacha3_profile_v1") || "null");
 
@@ -281,93 +282,142 @@ function refreshAllPlotSigns() {
 }
 
 // ==========================================
-// МУЛЬТИПЛЕЕРНАЯ СИНХРОНИЗАЦИЯ (ЕДИНЫЙ СЕРВЕР СНТ #1)
+// МУЛЬТИПЛЕЕРНАЯ СИНХРОНИЗАЦИЯ (ЕДИНЫЙ ЦЕНТРАЛЬНЫЙ СЕРВЕР СНТ #1)
 // ==========================================
-const worldSk = generateSecretKey();
-const seenPackets = new Set();
-const wsRelays = [];
-const pendingFrames = [];
-const bcChannel = typeof BroadcastChannel !== "undefined" ? new BroadcastChannel("project_dacha_3_sync") : null;
-let partySocket = null;
-let lastWorldSyncReplyAt = 0;
+const CENTRAL_ROOM_TOPIC = "project_dacha3_snt_unified_server_v4";
+const NTFY_HTTP_URL = `https://ntfy.sh/${CENTRAL_ROOM_TOPIC}`;
+const NTFY_WS_URL = `wss://ntfy.sh/${CENTRAL_ROOM_TOPIC}/ws?since=all`;
+const NTFY_SSE_URL = `https://ntfy.sh/${CENTRAL_ROOM_TOPIC}/sse?since=all`;
 
-const RELAY_URLS = [
-  "wss://nos.lol",
-  "wss://relay.damus.io",
-  "wss://relay.primal.net",
-  "wss://offchain.pub",
-  "wss://nostr.mom"
-];
+const seenPackets = new Set();
+const bcChannel = typeof BroadcastChannel !== "undefined" ? new BroadcastChannel("project_dacha_3_sync_v4") : null;
+
+let ntfyConnected = false;
+let mqttClient = null;
+let mqttConnected = false;
+let peerInstance = null;
+let myPeerId = "";
+const peerConnections = new Map();
+let lastNtfyPosSentAt = 0;
 
 function updateNetBadge() {
-  const openCount = wsRelays.filter((w) => w.readyState === WebSocket.OPEN).length;
   const el = document.getElementById("net-status");
   if (!el) return;
-  if (openCount > 0) {
-    el.textContent = `🟢 Сервер СНТ #1 (${openCount} узл.)`;
+  const peersCount = peerConnections.size;
+  if (ntfyConnected || mqttConnected || peersCount > 0) {
+    el.textContent = `🟢 Единый Сервер СНТ #1 (Игроков: ${state.remotePlayers.size + 1})`;
   } else {
-    el.textContent = "🟡 Подключение к СНТ #1...";
+    el.textContent = "🟡 Подключение к Серверу СНТ #1...";
   }
 }
 
-function broadcastNetworkPacket(payload, isWorldState = false) {
-  const pktId = `${state.playerKey}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-  const fullPkt = { ...payload, pktId, senderKey: state.playerKey };
-  seenPackets.add(pktId);
-
-  if (bcChannel) {
-    try { bcChannel.postMessage(fullPkt); } catch {}
-  }
-  if (partySocket && partySocket.readyState === WebSocket.OPEN) {
-    try { partySocket.send(JSON.stringify(fullPkt)); } catch {}
-  }
-
-  const tag = isWorldState ? "project-dacha-3-world-state-v2" : "project-dacha-3-live-pos-v2";
+function connectToPeer(remotePeerId) {
+  if (!peerInstance || !remotePeerId || remotePeerId === myPeerId || peerConnections.has(remotePeerId)) return;
   try {
-    // Для частых пакетов движения используем одноразовый ключ, чтобы релеи никогда не применяли rate-limit по pubkey!
-    const skToUse = worldSk;
-    const ev = finalizeEvent(
-      {
-        kind: 1,
-        created_at: Math.floor(Date.now() / 1000),
-        tags: [["t", tag]],
-        content: JSON.stringify(fullPkt)
-      },
-      skToUse
-    );
-    const frame = JSON.stringify(["EVENT", ev]);
-    let sentAny = false;
-    for (const ws of wsRelays) {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(frame);
-        sentAny = true;
-      }
-    }
-    if (!sentAny && isWorldState) {
-      pendingFrames.push(frame);
-    }
+    const conn = peerInstance.connect(remotePeerId, { reliable: false });
+    setupPeerConnection(conn);
   } catch {}
 }
 
-function sendMyPresenceAndWorldSnapshot() {
-  if (!state.started) return;
+function setupPeerConnection(conn) {
+  if (!conn || !conn.peer) return;
+  conn.on("open", () => {
+    peerConnections.set(conn.peer, conn);
+    updateNetBadge();
+    if (state.started) {
+      conn.send(buildPresencePacket("player_joined"));
+      conn.send({
+        type: "world_sync_snapshot",
+        pktId: `${state.playerKey}_snap_${Date.now()}`,
+        senderKey: state.playerKey,
+        plots: state.plots,
+        structures: state.structures,
+        harvested: state.harvested
+      });
+    }
+  });
+  conn.on("data", (data) => {
+    if (typeof data === "string") {
+      try { handleIncomingPacket(JSON.parse(data)); } catch {}
+    } else if (data && typeof data === "object") {
+      handleIncomingPacket(data);
+    }
+  });
+  conn.on("close", () => {
+    peerConnections.delete(conn.peer);
+    updateNetBadge();
+  });
+  conn.on("error", () => {
+    peerConnections.delete(conn.peer);
+  });
+}
+
+function buildPresencePacket(type = "player_moved") {
   const myPlotsCount = Object.values(state.plots).filter((p) => p.ownerKey === state.playerKey).length;
-  broadcastNetworkPacket({
-    type: "player_moved",
+  return {
+    type,
+    pktId: `${state.playerKey}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    senderKey: state.playerKey,
+    peerId: myPeerId,
     name: state.name,
     color: state.color,
     x: Number(state.x.toFixed(2)),
     y: Number(state.y.toFixed(2)),
     z: Number(state.z.toFixed(2)),
     ry: Number(state.ry.toFixed(2)),
-    anim: "idle",
+    anim: state.workTimer > 0 ? "work" : "walk",
     money: Math.round(state.money),
     plotsCount: myPlotsCount
-  }, false);
+  };
+}
 
-  const plotsCount = Object.keys(state.plots).length;
-  const structsCount = Object.keys(state.structures).length;
-  if (plotsCount > 0 || structsCount > 0) {
+function broadcastNetworkPacket(payload, isWorldState = false) {
+  const pktId = payload.pktId || `${state.playerKey}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const fullPkt = { ...payload, pktId, senderKey: state.playerKey, peerId: myPeerId };
+  seenPackets.add(pktId);
+  const rawJson = JSON.stringify(fullPkt);
+
+  // 1. Локальные вкладки браузера
+  if (bcChannel) {
+    try { bcChannel.postMessage(fullPkt); } catch {}
+  }
+
+  // 2. Прямые WebRTC-соединения PeerJS между всеми игроками (мгновенно, без лимитов)
+  for (const conn of peerConnections.values()) {
+    if (conn.open) {
+      try { conn.send(fullPkt); } catch {}
+    }
+  }
+
+  // 3. Единый MQTT-канал
+  if (mqttClient && mqttConnected) {
+    try {
+      mqttClient.publish(`${CENTRAL_ROOM_TOPIC}/live`, rawJson, { qos: isWorldState ? 1 : 0 });
+    } catch {}
+  }
+
+  // 4. Центральный сервер ntfy.sh (хранит историю всех покупок участков, построек, чата и входов 12 часов!)
+  const now = Date.now();
+  const shouldPostNtfy =
+    isWorldState ||
+    fullPkt.type === "player_joined" ||
+    fullPkt.type === "request_world_sync" ||
+    (fullPkt.type === "player_moved" && now - lastNtfyPosSentAt > 3500);
+
+  if (shouldPostNtfy) {
+    if (fullPkt.type === "player_moved") lastNtfyPosSentAt = now;
+    fetch(NTFY_HTTP_URL, {
+      method: "POST",
+      body: rawJson
+    }).catch(() => {});
+  }
+}
+
+function sendMyPresenceAndWorldSnapshot() {
+  if (!state.started) return;
+  broadcastNetworkPacket(buildPresencePacket("player_joined"), false);
+
+  if (Object.keys(state.plots).length > 0 || Object.keys(state.structures).length > 0) {
     broadcastNetworkPacket({
       type: "world_sync_snapshot",
       plots: state.plots,
@@ -416,20 +466,26 @@ function mergeWorldSnapshot(pkt) {
   saveLocalProfile();
 }
 
+let lastWorldSyncReplyAt = 0;
+
 function handleIncomingPacket(pkt) {
   if (!pkt || !pkt.type) return;
   if (pkt.pktId) {
     if (seenPackets.has(pkt.pktId)) return;
     seenPackets.add(pkt.pktId);
-    if (seenPackets.size > 3000) seenPackets.delete(seenPackets.values().next().value);
+    if (seenPackets.size > 4000) seenPackets.delete(seenPackets.values().next().value);
   }
   if (pkt.senderKey === state.playerKey) return;
 
+  if (pkt.peerId && pkt.peerId !== myPeerId) {
+    connectToPeer(pkt.peerId);
+  }
+
   switch (pkt.type) {
     case "request_world_sync": {
-      if (Date.now() - lastWorldSyncReplyAt > 1200) {
+      if (Date.now() - lastWorldSyncReplyAt > 1500) {
         lastWorldSyncReplyAt = Date.now();
-        setTimeout(() => sendMyPresenceAndWorldSnapshot(), 150 + Math.random() * 350);
+        setTimeout(() => sendMyPresenceAndWorldSnapshot(), 150 + Math.random() * 300);
       }
       break;
     }
@@ -450,12 +506,12 @@ function handleIncomingPacket(pkt) {
           id: pid,
           name: pkt.name || "Дачник",
           color: pkt.color || "#1565c0",
-          x: pkt.x || 0,
-          y: pkt.y || 0,
-          z: pkt.z || 42,
-          tx: pkt.x || 0,
-          tz: pkt.z || 42,
-          ry: pkt.ry || 0,
+          x: pkt.x ?? 0,
+          y: pkt.y ?? 0,
+          z: pkt.z ?? 42,
+          tx: pkt.x ?? 0,
+          tz: pkt.z ?? 42,
+          ry: pkt.ry ?? 0,
           anim: pkt.anim || "idle",
           money: pkt.money ?? 500,
           plotsCount: pkt.plotsCount ?? 0,
@@ -464,6 +520,7 @@ function handleIncomingPacket(pkt) {
         };
         state.remotePlayers.set(pid, rp);
         updateOnlineListUI();
+        updateNetBadge();
       } else {
         if (pkt.name && pkt.name !== rp.name) {
           rp.name = pkt.name;
@@ -480,9 +537,9 @@ function handleIncomingPacket(pkt) {
         rp.lastSeen = Date.now();
       }
 
-      if ((pkt.type === "player_joined" || isNewPlayer) && Date.now() - lastWorldSyncReplyAt > 1200) {
+      if ((pkt.type === "player_joined" || isNewPlayer) && Date.now() - lastWorldSyncReplyAt > 1500) {
         lastWorldSyncReplyAt = Date.now();
-        setTimeout(() => sendMyPresenceAndWorldSnapshot(), 120 + Math.random() * 300);
+        setTimeout(() => sendMyPresenceAndWorldSnapshot(), 150 + Math.random() * 250);
       }
       break;
     }
@@ -545,62 +602,79 @@ function handleIncomingPacket(pkt) {
   }
 }
 
-function connectSingleRelay(url) {
-  try {
-    const ws = new WebSocket(url);
-    wsRelays.push(ws);
-    ws.onopen = () => {
-      updateNetBadge();
-      const nowSec = Math.floor(Date.now() / 1000);
-      ws.send(JSON.stringify(["REQ", "world-v2", { "#t": ["project-dacha-3-world-state-v2"], limit: 250 }]));
-      ws.send(JSON.stringify(["REQ", "live-v2", { "#t": ["project-dacha-3-live-pos-v2"], since: nowSec - 120 }]));
-
-      while (pendingFrames.length > 0) {
-        const f = pendingFrames.shift();
-        try { ws.send(f); } catch {}
-      }
-
-      if (state.started) {
-        broadcastNetworkPacket({ type: "request_world_sync" }, false);
-        sendMyPresenceAndWorldSnapshot();
-      }
-    };
-    ws.onmessage = (ev) => {
-      try {
-        const arr = JSON.parse(ev.data);
-        if (arr[0] === "EVENT" && arr[2] && arr[2].content) {
-          handleIncomingPacket(JSON.parse(arr[2].content));
-        }
-      } catch {}
-    };
-    ws.onclose = () => {
-      updateNetBadge();
-      const idx = wsRelays.indexOf(ws);
-      if (idx !== -1) wsRelays.splice(idx, 1);
-      setTimeout(() => connectSingleRelay(url), 4000);
-    };
-    ws.onerror = () => updateNetBadge();
-  } catch {}
-}
-
 let networkInitialized = false;
 function initMultiplayerNetwork() {
   if (networkInitialized) return;
   networkInitialized = true;
 
   if (bcChannel) bcChannel.onmessage = (ev) => handleIncomingPacket(ev.data);
-  RELAY_URLS.forEach((url) => connectSingleRelay(url));
 
-  const partyHost = new URLSearchParams(window.location.search).get("party");
-  if (partyHost) {
-    try {
-      const proto = partyHost.startsWith("localhost") ? "ws" : "wss";
-      partySocket = new WebSocket(`${proto}://${partyHost}/party/main`);
-      partySocket.onmessage = (e) => {
-        try { handleIncomingPacket(JSON.parse(e.data)); } catch {}
-      };
-    } catch {}
-  }
+  // 1. Подключаемся к единому центральному серверу ntfy.sh (WebSocket + EventSource резерв)
+  try {
+    const ws = new WebSocket(NTFY_WS_URL);
+    ws.onopen = () => {
+      ntfyConnected = true;
+      updateNetBadge();
+      if (state.started) sendMyPresenceAndWorldSnapshot();
+    };
+    ws.onmessage = (ev) => {
+      try {
+        const wrapper = JSON.parse(ev.data);
+        if (wrapper && wrapper.event === "message" && wrapper.message) {
+          handleIncomingPacket(JSON.parse(wrapper.message));
+        }
+      } catch {}
+    };
+    ws.onclose = () => {
+      ntfyConnected = false;
+      updateNetBadge();
+      // Резервный поток через SSE (HTTPS порт 443)
+      try {
+        const sse = new EventSource(NTFY_SSE_URL);
+        sse.onopen = () => {
+          ntfyConnected = true;
+          updateNetBadge();
+        };
+        sse.onmessage = (ev) => {
+          try {
+            const wrapper = JSON.parse(ev.data);
+            if (wrapper && wrapper.event === "message" && wrapper.message) {
+              handleIncomingPacket(JSON.parse(wrapper.message));
+            }
+          } catch {}
+        };
+      } catch {}
+    };
+  } catch {}
+
+  // 2. Запускаем PeerJS для мгновенной передачи координат игроков напрямую (port 443)
+  try {
+    peerInstance = new Peer();
+    peerInstance.on("open", (id) => {
+      myPeerId = id;
+      updateNetBadge();
+      if (state.started) sendMyPresenceAndWorldSnapshot();
+    });
+    peerInstance.on("connection", (conn) => {
+      setupPeerConnection(conn);
+    });
+  } catch {}
+
+  // 3. Подключаем публичный MQTT брокер как дополнительный быстрый канал
+  try {
+    mqttClient = mqtt.connect("wss://broker.emqx.io:8084/mqtt", { connectTimeout: 5000 });
+    mqttClient.on("connect", () => {
+      mqttConnected = true;
+      updateNetBadge();
+      mqttClient.subscribe(`${CENTRAL_ROOM_TOPIC}/live`);
+      if (state.started) sendMyPresenceAndWorldSnapshot();
+    });
+    mqttClient.on("message", (_topic, payload) => {
+      try {
+        handleIncomingPacket(JSON.parse(payload.toString()));
+      } catch {}
+    });
+  } catch {}
 }
 
 // ==========================================
@@ -1765,7 +1839,7 @@ function animate(now) {
   }
 
   netSyncAccum += dt;
-  if (state.started && isMoving && netSyncAccum > 1.0) {
+  if (state.started && isMoving && netSyncAccum > 0.25) {
     netSyncAccum = 0;
     const myPlotsCount = Object.values(state.plots).filter((p) => p.ownerKey === state.playerKey).length;
     broadcastNetworkPacket({

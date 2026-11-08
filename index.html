@@ -4,12 +4,14 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>ProjectDacha3 — Мультиплеерная 3D Игра про Русские Садоводства</title>
-  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="style.css?v=4" />
   <script type="importmap">
     {
       "imports": {
         "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
-        "nostr-tools/pure": "https://esm.sh/nostr-tools@2.10.2/pure"
+        "nostr-tools/pure": "https://esm.sh/nostr-tools@2.10.2/pure",
+        "peerjs": "https://esm.sh/peerjs@1.5.4",
+        "mqtt": "https://esm.sh/mqtt@5.10.3"
       }
     }
   </script>
@@ -159,6 +161,6 @@
 
   <div id="toast-container"></div>
 
-  <script type="module" src="js/game.js"></script>
+  <script type="module" src="js/game.js?v=4"></script>
 </body>
 </html>
