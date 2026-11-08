@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { Peer } from "peerjs";
 import mqtt from "mqtt";
 import { generateSecretKey, finalizeEvent } from "nostr-tools/pure";
-import { CHUNK_SIZE, getTerrainHeight, getChunkLayout } from "./world.js?v=5";
+import { CHUNK_SIZE, getTerrainHeight, getChunkLayout } from "./world.js?v=6";
 import {
   ITEMS,
   CROPS,
@@ -11,7 +11,7 @@ import {
   SHOP_GOODS,
   BAZAAR_PRICES,
   playSfx
-} from "./data.js?v=5";
+} from "./data.js?v=6";
 import {
   createTerrainChunkMesh,
   createResourceMesh,
@@ -23,7 +23,7 @@ import {
   createPlayerMesh,
   createFirstPersonViewmodel,
   animatePlayerMesh
-} from "./models.js?v=5";
+} from "./models.js?v=6";
 
 const savedProfile = JSON.parse(localStorage.getItem("project_dacha3_profile_v1") || "null");
 
@@ -287,8 +287,8 @@ function refreshAllPlotSigns() {
 // ==========================================
 const CENTRAL_ROOM_TOPIC = "project_dacha3_snt_unified_server_v4";
 const NTFY_HTTP_URL = `https://ntfy.sh/${CENTRAL_ROOM_TOPIC}`;
-const NTFY_WS_URL = `wss://ntfy.sh/${CENTRAL_ROOM_TOPIC}/ws?since=all`;
-const NTFY_SSE_URL = `https://ntfy.sh/${CENTRAL_ROOM_TOPIC}/sse?since=all`;
+const NTFY_WS_URL = `wss://ntfy.sh/${CENTRAL_ROOM_TOPIC}/ws?since=2h`;
+const NTFY_SSE_URL = `https://ntfy.sh/${CENTRAL_ROOM_TOPIC}/sse?since=2h`;
 
 const seenPackets = new Set();
 const bcChannel = typeof BroadcastChannel !== "undefined" ? new BroadcastChannel("project_dacha_3_sync_v4") : null;
@@ -301,6 +301,34 @@ let peerInstance = null;
 let myPeerId = "";
 const peerConnections = new Map();
 let lastNtfyPosSentAt = 0;
+
+
+function removeRemotePlayer(pid) {
+  const rp = state.remotePlayers.get(pid);
+  if (!rp) return;
+  if (rp.mesh) {
+    scene.remove(rp.mesh);
+  }
+  state.remotePlayers.delete(pid);
+  updateOnlineListUI();
+  updateNetBadge();
+}
+
+function cleanupDepartedPlayers() {
+  const now = Date.now();
+  let removedAny = false;
+  for (const [pid, rp] of state.remotePlayers.entries()) {
+    if (now - rp.lastSeen > 6500) {
+      if (rp.mesh) scene.remove(rp.mesh);
+      state.remotePlayers.delete(pid);
+      removedAny = true;
+    }
+  }
+  if (removedAny) {
+    updateOnlineListUI();
+    updateNetBadge();
+  }
+}
 
 function updateNetBadge() {
   const el = document.getElementById("net-status");
@@ -349,6 +377,9 @@ function setupPeerConnection(conn) {
   });
   conn.on("close", () => {
     peerConnections.delete(conn.peer);
+    for (const [pid, rp] of state.remotePlayers.entries()) {
+      if (rp.peerId === conn.peer) removeRemotePlayer(pid);
+    }
     updateNetBadge();
   });
   conn.on("error", () => {
@@ -377,7 +408,7 @@ function buildPresencePacket(type = "player_moved") {
 
 function broadcastNetworkPacket(payload, isWorldState = false) {
   const pktId = payload.pktId || `${state.playerKey}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-  const fullPkt = { ...payload, pktId, senderKey: state.playerKey, peerId: myPeerId };
+  const fullPkt = { ...payload, pktId, senderKey: state.playerKey, peerId: myPeerId, sentAt: Date.now() };
   seenPackets.add(pktId);
   const rawJson = JSON.stringify(fullPkt);
 
@@ -518,8 +549,15 @@ function handleIncomingPacket(pkt) {
       mergeWorldSnapshot(pkt);
       break;
     }
+    case "player_left": {
+      const pid = pkt.senderKey || pkt.id;
+      if (pid) removeRemotePlayer(pid);
+      break;
+    }
     case "player_moved":
     case "player_joined": {
+      // Отсекаем старые пакеты движения/входа из истории релеев, чтобы ушедшие игроки никогда не появлялись!
+      if (!pkt.sentAt || Math.abs(Date.now() - pkt.sentAt) > 7000) return;
       const pid = pkt.senderKey || pkt.id;
       if (!pid || pid === state.playerKey) return;
       const isNewPlayer = !state.remotePlayers.has(pid);
@@ -529,6 +567,7 @@ function handleIncomingPacket(pkt) {
         scene.add(mesh);
         rp = {
           id: pid,
+          peerId: pkt.peerId || "",
           name: pkt.name || "Дачник",
           color: pkt.color || "#1565c0",
           x: pkt.x ?? 0,
@@ -559,6 +598,7 @@ function handleIncomingPacket(pkt) {
         rp.anim = pkt.anim || "idle";
         if (typeof pkt.money === "number") rp.money = pkt.money;
         if (typeof pkt.plotsCount === "number") rp.plotsCount = pkt.plotsCount;
+        if (pkt.peerId) rp.peerId = pkt.peerId;
         rp.lastSeen = Date.now();
       }
 
@@ -626,6 +666,37 @@ function handleIncomingPacket(pkt) {
     }
   }
 }
+
+
+function sendLeaveNotification() {
+  if (!state.started) return;
+  const leavePkt = {
+    type: "player_left",
+    pktId: `${state.playerKey}_left_${Date.now()}`,
+    senderKey: state.playerKey,
+    peerId: myPeerId,
+    sentAt: Date.now()
+  };
+  const raw = JSON.stringify(leavePkt);
+  if (bcChannel) {
+    try { bcChannel.postMessage(leavePkt); } catch {}
+  }
+  for (const conn of peerConnections.values()) {
+    if (conn.open) {
+      try { conn.send(leavePkt); } catch {}
+    }
+  }
+  for (const mc of mqttClients) {
+    if (mc.connected) {
+      try { mc.publish(`${CENTRAL_ROOM_TOPIC}/live`, raw); } catch {}
+    }
+  }
+  if (navigator.sendBeacon) {
+    try { navigator.sendBeacon(NTFY_HTTP_URL, raw); } catch {}
+  }
+}
+window.addEventListener("pagehide", sendLeaveNotification);
+window.addEventListener("beforeunload", sendLeaveNotification);
 
 let networkInitialized = false;
 function initMultiplayerNetwork() {
@@ -1716,6 +1787,7 @@ function startGame() {
   fpHand.visible = state.firstPerson;
   camera.add(fpHand);
 
+  cleanupDepartedPlayers();
   ensureChunksAroundPlayer();
   refreshAllPlotSigns();
   for (const s of Object.values(state.structures)) {
@@ -1854,6 +1926,7 @@ function animate(now) {
   cropVisualAccum += dt;
   if (cropVisualAccum > 0.45) {
     cropVisualAccum = 0;
+    cleanupDepartedPlayers();
     for (const s of Object.values(state.structures)) {
       if (s.type === "bed" || s.type === "greenhouse") {
         const sm = structureMeshes.get(s.id);
