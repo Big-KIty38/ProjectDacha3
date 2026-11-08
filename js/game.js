@@ -19,6 +19,7 @@ import {
   createStructureMesh,
   updateCropVisuals,
   createPlayerMesh,
+  createFirstPersonViewmodel,
   animatePlayerMesh
 } from "./models.js";
 
@@ -57,12 +58,14 @@ const state = {
   },
   x: 0,
   y: 0,
-  z: 24,
+  z: 42,
   vy: 0,
   ry: Math.PI,
   camYaw: 0,
-  camPitch: 0.42,
-  camDist: 11.5,
+  camPitch: 0.06,
+  camDist: 10.5,
+  firstPerson: true,
+  walkBob: 0,
   isGrounded: true,
   workTimer: 0,
   buildMode: null,
@@ -125,8 +128,13 @@ sunLight.shadow.camera.bottom = -d;
 scene.add(sunLight);
 scene.add(sunLight.target);
 
+scene.add(camera);
 let selfMesh = createPlayerMesh(state.name, state.color);
+selfMesh.visible = !state.firstPerson;
 scene.add(selfMesh);
+
+let fpHand = createFirstPersonViewmodel(state.color);
+camera.add(fpHand);
 
 const buildGhostGroup = new THREE.Group();
 scene.add(buildGhostGroup);
@@ -425,7 +433,7 @@ function findNearestInteractable() {
   const px = state.x;
   const pz = state.z;
   let best = null;
-  let bestDist = 4.6;
+  let bestDist = 5.8;
 
   for (const ch of loadedChunks.values()) {
     const dShop = Math.hypot(px - ch.layout.shopPos.x, pz - ch.layout.shopPos.z);
@@ -739,6 +747,7 @@ function openCraftModal() {
     });
     modalBody.appendChild(card);
   });
+  if (document.pointerLockElement) document.exitPointerLock();
   modalBackdrop.style.display = "flex";
 }
 
@@ -765,6 +774,7 @@ function openBuildModal() {
     });
     modalBody.appendChild(card);
   });
+  if (document.pointerLockElement) document.exitPointerLock();
   modalBackdrop.style.display = "flex";
 }
 
@@ -793,6 +803,7 @@ function openShopModal() {
     });
     modalBody.appendChild(card);
   });
+  if (document.pointerLockElement) document.exitPointerLock();
   modalBackdrop.style.display = "flex";
 }
 
@@ -837,6 +848,7 @@ function openBazaarModal() {
     });
     modalBody.appendChild(card);
   });
+  if (document.pointerLockElement) document.exitPointerLock();
   modalBackdrop.style.display = "flex";
 }
 
@@ -868,6 +880,7 @@ function openGardenPlantModal(struct) {
     });
     modalBody.appendChild(card);
   });
+  if (document.pointerLockElement) document.exitPointerLock();
   modalBackdrop.style.display = "flex";
 }
 
@@ -914,6 +927,7 @@ function openGardenCareModal(struct) {
     closeModal();
   });
   modalBody.appendChild(fertCard);
+  if (document.pointerLockElement) document.exitPointerLock();
   modalBackdrop.style.display = "flex";
 }
 
@@ -947,7 +961,8 @@ function exitBuildMode() {
 }
 
 function getBuildPreviewCoords() {
-  const dist = 4.6;
+  const dist = 5.5;
+  state.ry = state.camYaw;
   const gx = state.x - Math.sin(state.ry) * dist;
   const gz = state.z - Math.cos(state.ry) * dist;
   return { x: gx, y: getTerrainHeight(gx, gz), z: gz };
@@ -1038,6 +1053,12 @@ window.addEventListener("keydown", (e) => {
   else if (k === "KeyN") openBazaarModal();
   else if (k === "KeyR" && state.buildMode) state.buildRot = (state.buildRot + Math.PI / 2) % (Math.PI * 2);
   else if (k === "KeyX") demolishNearestStructure();
+  else if (k === "KeyV") {
+    state.firstPerson = !state.firstPerson;
+    selfMesh.visible = !state.firstPerson;
+    fpHand.visible = state.firstPerson;
+    showToast(state.firstPerson ? "👁️ Вид от первого лица" : "🎥 Вид от третьего лица");
+  }
   else if (k === "Escape") { closeModal(); exitBuildMode(); }
   else if (k === "Enter") document.getElementById("chat-input").focus();
 });
@@ -1049,23 +1070,33 @@ let lastMouseX = 0;
 let lastMouseY = 0;
 
 canvas.addEventListener("mousedown", (e) => {
+  if (state.started && modalBackdrop.style.display !== "flex" && document.pointerLockElement !== canvas) {
+    try { canvas.requestPointerLock(); } catch {}
+  }
   isDraggingCam = true;
   dragMoved = false;
   lastMouseX = e.clientX;
   lastMouseY = e.clientY;
 });
 window.addEventListener("mousemove", (e) => {
+  if (document.pointerLockElement === canvas && state.started) {
+    state.camYaw -= e.movementX * 0.0026;
+    state.camPitch = Math.max(-1.25, Math.min(1.25, state.camPitch + e.movementY * 0.0024));
+    state.ry = state.camYaw;
+    return;
+  }
   if (!isDraggingCam) return;
   const dx = e.clientX - lastMouseX;
   const dy = e.clientY - lastMouseY;
   if (Math.abs(dx) > 3 || Math.abs(dy) > 3) dragMoved = true;
   lastMouseX = e.clientX;
   lastMouseY = e.clientY;
-  state.camYaw -= dx * 0.0065;
-  state.camPitch = Math.max(0.15, Math.min(1.25, state.camPitch + dy * 0.0055));
+  state.camYaw -= dx * 0.006;
+  state.camPitch = Math.max(-1.2, Math.min(1.2, state.camPitch + dy * 0.005));
+  state.ry = state.camYaw;
 });
 window.addEventListener("mouseup", (e) => {
-  if (isDraggingCam && !dragMoved && state.started && e.button === 0) {
+  if (!dragMoved && state.started && e.button === 0) {
     if (state.buildMode) confirmPlaceBuilding();
     else executeInteraction(findNearestInteractable());
   }
@@ -1191,7 +1222,7 @@ const mmCtx = minimapCanvas.getContext("2d");
 function renderMinimap() {
   const w = minimapCanvas.width;
   const h = minimapCanvas.height;
-  const scale = 1.15;
+  const scale = 0.62;
   mmCtx.fillStyle = "#1c331e";
   mmCtx.fillRect(0, 0, w, h);
 
@@ -1287,7 +1318,13 @@ function startGame() {
 
   scene.remove(selfMesh);
   selfMesh = createPlayerMesh(state.name, state.color);
+  selfMesh.visible = !state.firstPerson;
   scene.add(selfMesh);
+
+  camera.remove(fpHand);
+  fpHand = createFirstPersonViewmodel(state.color);
+  fpHand.visible = state.firstPerson;
+  camera.add(fpHand);
 
   ensureChunksAroundPlayer();
   updateHudUI();
@@ -1472,13 +1509,38 @@ function animate(now) {
     });
   }
 
-  const camX = state.x + Math.sin(state.camYaw) * Math.cos(state.camPitch) * state.camDist;
-  const camZ = state.z + Math.cos(state.camYaw) * Math.cos(state.camPitch) * state.camDist;
-  const minCamY = getTerrainHeight(camX, camZ) + 1.2;
-  const camY = Math.max(minCamY, state.y + 1.8 + Math.sin(state.camPitch) * state.camDist);
+  if (state.started && state.firstPerson) {
+    if (isMoving && state.isGrounded) {
+      state.walkBob += dt * 11;
+    }
+    const bobY = isMoving && state.isGrounded ? Math.sin(state.walkBob) * 0.055 : 0;
+    const eyeY = state.y + 1.74 + bobY;
+    camera.position.set(state.x, eyeY, state.z);
 
-  camera.position.set(camX, camY, camZ);
-  camera.lookAt(state.x, state.y + 1.6, state.z);
+    const lookX = state.x - Math.sin(state.camYaw) * Math.cos(state.camPitch) * 10;
+    const lookY = eyeY - Math.sin(state.camPitch) * 10;
+    const lookZ = state.z - Math.cos(state.camYaw) * Math.cos(state.camPitch) * 10;
+    camera.lookAt(lookX, lookY, lookZ);
+
+    if (fpHand && fpHand.userData.arm) {
+      const arm = fpHand.userData.arm;
+      if (state.workTimer > 0) {
+        arm.rotation.x = 0.2 - Math.sin(state.workTimer * 26) * 0.85;
+      } else {
+        arm.rotation.x = 0.2 + Math.sin(elapsedSec * 2.5) * 0.03;
+      }
+      arm.position.y = -0.28 + (isMoving ? Math.cos(state.walkBob) * 0.025 : 0);
+    }
+  } else {
+    const pitch3P = Math.max(0.15, Math.min(1.2, state.camPitch + 0.35));
+    const camX = state.x + Math.sin(state.camYaw) * Math.cos(pitch3P) * state.camDist;
+    const camZ = state.z + Math.cos(state.camYaw) * Math.cos(pitch3P) * state.camDist;
+    const minCamY = getTerrainHeight(camX, camZ) + 1.2;
+    const camY = Math.max(minCamY, state.y + 1.8 + Math.sin(pitch3P) * state.camDist);
+
+    camera.position.set(camX, camY, camZ);
+    camera.lookAt(state.x, state.y + 1.6, state.z);
+  }
 
   sunLight.position.set(state.x + 45, state.y + 75, state.z + 35);
   sunLight.target.position.set(state.x, state.y, state.z);

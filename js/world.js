@@ -1,6 +1,7 @@
-// Детерминированная генерация бесконечного мира: неровный рельеф, дороги, СНТ, участки, лес, кусты с ягодами
+// Детерминированная генерация бесконечного мира в масштабе 1:1 к человеку:
+// Крупные участки (32x34 м ~ 10 соток), широкие дороги (10-14 м), густой плотный лес и неровный рельеф
 
-export const CHUNK_SIZE = 160;
+export const CHUNK_SIZE = 300;
 export const WORLD_SEED = 20260777;
 
 const SNT_TITLES = [
@@ -28,19 +29,17 @@ export function hash2D(x, z, salt = 0) {
   return (h >>> 0) / 4294967296;
 }
 
-// Изгиб главного лесного шоссе (идёт с севера на юг через весь мир)
 export function getHighwayX(z) {
-  return Math.sin(z * 0.012) * 14 + Math.cos(z * 0.0045) * 9;
+  return Math.sin(z * 0.007) * 22 + Math.cos(z * 0.003) * 14;
 }
 
-// Плавный неровный рельеф с небольшими возвышенностями и низменностями
+// Неровный рельеф с плавными возвышенностями и низменностями
 export function getTerrainHeight(x, z) {
-  const n1 = Math.sin(x * 0.021 + 0.7) * Math.cos(z * 0.021 - 0.4) * 2.4;
-  const n2 = Math.sin((x + z) * 0.043) * 1.15 + Math.cos((x - z) * 0.037) * 0.95;
-  const n3 = Math.sin(x * 0.09) * Math.sin(z * 0.09) * 0.35;
+  const n1 = Math.sin(x * 0.013 + 0.7) * Math.cos(z * 0.013 - 0.4) * 3.4;
+  const n2 = Math.sin((x + z) * 0.027) * 1.45 + Math.cos((x - z) * 0.023) * 1.15;
+  const n3 = Math.sin(x * 0.065) * Math.sin(z * 0.065) * 0.4;
   let raw = n1 + n2 + n3;
 
-  // Слегка сглаживаем рельеф на дорогах и внутри СНТ, сохраняя плавные холмы и низины
   const cx = Math.floor((x + CHUNK_SIZE * 0.5) / CHUNK_SIZE);
   const cz = Math.floor((z + CHUNK_SIZE * 0.5) / CHUNK_SIZE);
   const centerX = cx * CHUNK_SIZE;
@@ -49,18 +48,17 @@ export function getTerrainHeight(x, z) {
   const lx = x - centerX;
   const lz = z - centerZ;
 
-  // В зоне участков и подъездной дороги перепад высот более мягкий, чтобы дома стояли красиво
-  if (Math.abs(lx) < 58 && Math.abs(lz) < 54) {
+  // В зоне дачных участков рельеф меняется плавно, чтобы дома стояли реалистично
+  if (Math.abs(lx) < 92 && Math.abs(lz) < 82) {
     const baseChunkH =
-      Math.sin(centerX * 0.021 + 0.7) * Math.cos(centerZ * 0.021 - 0.4) * 1.9 +
-      Math.sin((centerX + centerZ) * 0.035) * 0.9;
-    raw = baseChunkH + (raw - baseChunkH) * 0.32;
+      Math.sin(centerX * 0.013 + 0.7) * Math.cos(centerZ * 0.013 - 0.4) * 2.5 +
+      Math.sin((centerX + centerZ) * 0.022) * 1.1;
+    raw = baseChunkH + (raw - baseChunkH) * 0.35;
   }
 
   return raw;
 }
 
-// Классификация поверхности для цвета травы/дорог/газона
 export function getSurfaceType(x, z) {
   const cx = Math.floor((x + CHUNK_SIZE * 0.5) / CHUNK_SIZE);
   const cz = Math.floor((z + CHUNK_SIZE * 0.5) / CHUNK_SIZE);
@@ -69,41 +67,40 @@ export function getSurfaceType(x, z) {
   const lx = x - centerX;
   const lz = z - centerZ;
 
-  // 1. Главное шоссе вдоль центральных чанков или межрайонных трактов
-  const hwyX = getHighwayX(z) + cx * CHUNK_SIZE - (cx === 0 ? 0 : lx * 0);
-  if (cx === 0 && Math.abs(x - getHighwayX(z)) < 5.2) {
+  // 1. Широкое лесное шоссе (14 м шириной)
+  if (cx === 0 && Math.abs(x - getHighwayX(z)) < 7.2) {
     return "asphalt";
   }
 
-  // 2. Поперечная лесная дорога, соединяющая соседние садоводства и шоссе (при lz около +42)
-  const roadZ = 42 + Math.sin(x * 0.025) * 3.5;
-  if (Math.abs(lz - roadZ) < 4.2) {
+  // 2. Поперечный лесной тракт, ведущий к садоводствам (ширина 10.5 м)
+  const roadZ = 76 + Math.sin(x * 0.016) * 4.5;
+  if (Math.abs(lz - roadZ) < 5.4) {
     return "dirt_road";
   }
 
-  // 3. Подъездная дорога от тракта к воротам СНТ и центральная аллея СНТ (lz от -34 до +42, lx около 0 или вдоль линии)
-  if (lz >= -10 && lz <= roadZ + 2 && Math.abs(lx) < 4.0) {
-    return "dirt_road";
-  }
-  // Центральная улица СНТ вдоль рядов дач (lz около 0, lx от -46 до +46)
-  if (Math.abs(lz) < 4.2 && Math.abs(lx) < 47) {
+  // 3. Подъездная дорога к воротам СНТ (ширина 10 м)
+  if (lz >= -8 && lz <= roadZ + 3 && Math.abs(lx) < 5.2) {
     return "dirt_road";
   }
 
-  // 4. Газон внутри дачных участков (2 ряда по 4 участка)
-  if (Math.abs(lx) >= 4 && Math.abs(lx) <= 44 && ((lz >= 5 && lz <= 25) || (lz >= -25 && lz <= -5))) {
+  // 4. Широкая центральная улица СНТ вдоль рядов дач (ширина 11 м, длина 166 м)
+  if (Math.abs(lz) < 5.6 && Math.abs(lx) < 84) {
+    return "dirt_road";
+  }
+
+  // 5. Крупные дачные участки 1:1 (2 ряда по 4 участка, каждый 32x34 м)
+  if (Math.abs(lx) >= 6 && Math.abs(lx) <= 78 && ((lz >= 6.5 && lz <= 41.5) || (lz >= -41.5 && lz <= -6.5))) {
     return "lawn";
   }
 
-  // 5. Площадка у Магазина и Базара (при въезде в СНТ)
-  if (lz >= 25 && lz <= 38 && Math.abs(lx) <= 22) {
+  // 6. Торговая площадь у Магазина и Базара перед въездом в СНТ
+  if (lz >= 45 && lz <= 68 && Math.abs(lx) <= 34) {
     return "plaza";
   }
 
   return "forest";
 }
 
-// Получение полной структуры СНТ для чанка (cx, cz)
 export function getChunkLayout(cx, cz) {
   const centerX = cx * CHUNK_SIZE;
   const centerZ = cz * CHUNK_SIZE;
@@ -114,17 +111,15 @@ export function getChunkLayout(cx, cz) {
       ? "СНТ «Лесная Поляна»"
       : `СНТ «${SNT_TITLES[idx]}${regionNum > 1 ? "-" + regionNum : ""}»`;
 
-  // Координаты въездной арки, Магазина и Базара
-  const archPos = { x: centerX, z: centerZ + 33 };
-  const shopPos = { x: centerX - 12.5, z: centerZ + 31.5 };
-  const bazaarPos = { x: centerX + 12.5, z: centerZ + 31.5 };
+  const archPos = { x: centerX, z: centerZ + 56 };
+  const shopPos = { x: centerX - 18.5, z: centerZ + 54 };
+  const bazaarPos = { x: centerX + 18.5, z: centerZ + 54 };
 
-  // 8 участков в каждом СНТ (4 севернее центральной аллеи, 4 южнее)
-  // Центры по lx: -34, -14, +14, +34; по lz: -15 (северный ряд) и +15 (южный ряд)
-  const plotOffsetsX = [-34, -14, 14, 34];
+  // 8 реалистичных больших участков по 32x34 м (по 4 с каждой стороны широкой улицы)
+  const plotOffsetsX = [-60, -24, 24, 60];
   const plotRowsZ = [
-    { lz: -15, signLz: -4.8, signRot: 0 },
-    { lz: 15, signLz: 4.8, signRot: Math.PI }
+    { lz: -24, signLz: -6.4, signRot: 0 },
+    { lz: 24, signLz: 6.4, signRot: Math.PI }
   ];
 
   const plots = [];
@@ -144,9 +139,9 @@ export function getChunkLayout(cx, cz) {
         sntName,
         x: px,
         z: pz,
-        w: 18,
-        d: 18,
-        signX: px - 5.5,
+        w: 32,
+        d: 34,
+        signX: px - 9.5,
         signZ: centerZ + plotRowsZ[r].signLz,
         signRot: plotRowsZ[r].signRot
       });
@@ -154,54 +149,52 @@ export function getChunkLayout(cx, cz) {
     }
   }
 
-  // Генерация ресурсов (на участках изначально только деревья, газон и кусты с ягодами; вокруг СНТ — густой лес и камни)
   const resources = [];
 
-  // A) Ресурсы внутри каждого дачного участка (деревья и кусты, включая ягодные)
+  // A) На каждом дачном участке (32x34 м) изначально растут деревья, газон и ягодные кусты (16 объектов на участок)
   for (const p of plots) {
-    for (let i = 0; i < 8; i++) {
-      const rx = (hash2D(p.plotNum, i, 101) - 0.5) * (p.w - 3.6);
-      const rz = (hash2D(p.plotNum, i, 202) - 0.5) * (p.d - 3.6);
+    for (let i = 0; i < 16; i++) {
+      const rx = (hash2D(p.plotNum, i, 101) - 0.5) * (p.w - 5.0);
+      const rz = (hash2D(p.plotNum, i, 202) - 0.5) * (p.d - 5.0);
       const wx = p.x + rx;
       const wz = p.z + rz;
       const roll = hash2D(p.plotNum, i, 303);
       let kind = "berry_bush";
-      if (i < 2) {
-        kind = roll > 0.45 ? "birch" : "pine";
-      } else if (i < 4) {
+      if (i < 5) {
+        kind = roll > 0.42 ? "birch" : "pine";
+      } else if (i < 9) {
         kind = roll > 0.5 ? "birch" : "bush";
       } else {
-        kind = roll > 0.3 ? "berry_bush" : "bush";
+        kind = roll > 0.28 ? "berry_bush" : "bush";
       }
       resources.push({
         id: `res_${cx}_${cz}_p${p.localIndex}_${i}`,
         kind,
         x: wx,
         z: wz,
-        scale: 0.85 + hash2D(p.plotNum, i, 404) * 0.35,
+        scale: 0.95 + hash2D(p.plotNum, i, 404) * 0.45,
         rot: hash2D(p.plotNum, i, 505) * Math.PI * 2,
         onPlotId: p.plotId
       });
     }
   }
 
-  // B) Ресурсы в диком лесу вокруг СНТ (берёзы, сосны, ягодные кусты, валуны камня)
-  for (let i = 0; i < 72; i++) {
-    const lx = (hash2D(cx * 100 + i, cz, 601) - 0.5) * (CHUNK_SIZE - 8);
-    const lz = (hash2D(cx, cz * 100 + i, 702) - 0.5) * (CHUNK_SIZE - 8);
+  // B) Густой плотный лес вокруг садоводств и дорог (290 деревьев, кустов и камней на чанк!)
+  for (let i = 0; i < 290; i++) {
+    const lx = (hash2D(cx * 300 + i, cz, 601) - 0.5) * (CHUNK_SIZE - 6);
+    const lz = (hash2D(cx, cz * 300 + i, 702) - 0.5) * (CHUNK_SIZE - 6);
     const wx = centerX + lx;
     const wz = centerZ + lz;
 
-    // Не спавним деревья прямо на дорогах, участках или в павильонах магазина/базара
     const surf = getSurfaceType(wx, wz);
     if (surf !== "forest") continue;
 
     const roll = hash2D(cx + i, cz - i, 803);
     let kind = "pine";
-    if (roll < 0.34) kind = "birch";
-    else if (roll < 0.64) kind = "pine";
-    else if (roll < 0.80) kind = "berry_bush";
-    else if (roll < 0.90) kind = "bush";
+    if (roll < 0.40) kind = "birch";
+    else if (roll < 0.78) kind = "pine";
+    else if (roll < 0.89) kind = "berry_bush";
+    else if (roll < 0.95) kind = "bush";
     else kind = "rock";
 
     resources.push({
@@ -209,7 +202,7 @@ export function getChunkLayout(cx, cz) {
       kind,
       x: wx,
       z: wz,
-      scale: 0.8 + hash2D(cx, cz + i, 904) * 0.55,
+      scale: 0.9 + hash2D(cx, cz + i, 904) * 0.65,
       rot: hash2D(cx + i, cz, 995) * Math.PI * 2,
       onPlotId: null
     });
