@@ -145,14 +145,18 @@ function ensureChunksAroundPlayer() {
   const pcx = Math.floor((state.x + CHUNK_SIZE * 0.5) / CHUNK_SIZE);
   const pcz = Math.floor((state.z + CHUNK_SIZE * 0.5) / CHUNK_SIZE);
 
+  const coords = [[0, 0], [-1, 0], [1, 0], [0, -1], [0, 1], [-1, -1], [1, -1], [-1, 1], [1, 1]];
   const needed = new Set();
-  for (let dx = -1; dx <= 1; dx++) {
-    for (let dz = -1; dz <= 1; dz++) {
-      const cx = pcx + dx;
-      const cz = pcz + dz;
-      const key = `${cx},${cz}`;
-      needed.add(key);
-      if (!loadedChunks.has(key)) loadChunk(cx, cz);
+  let loadedThisCall = 0;
+
+  for (const [dx, dz] of coords) {
+    const cx = pcx + dx;
+    const cz = pcz + dz;
+    const key = `${cx},${cz}`;
+    needed.add(key);
+    if (!loadedChunks.has(key) && loadedThisCall < 1) {
+      loadChunk(cx, cz);
+      loadedThisCall++;
     }
   }
 
