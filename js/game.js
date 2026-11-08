@@ -1,7 +1,8 @@
 import * as THREE from "three";
 import { Peer } from "peerjs";
 import mqtt from "mqtt";
-import { CHUNK_SIZE, getTerrainHeight, getChunkLayout } from "./world.js?v=4";
+import { generateSecretKey, finalizeEvent } from "nostr-tools/pure";
+import { CHUNK_SIZE, getTerrainHeight, getChunkLayout } from "./world.js?v=5";
 import {
   ITEMS,
   CROPS,
@@ -10,7 +11,7 @@ import {
   SHOP_GOODS,
   BAZAAR_PRICES,
   playSfx
-} from "./data.js?v=4";
+} from "./data.js?v=5";
 import {
   createTerrainChunkMesh,
   createResourceMesh,
@@ -22,7 +23,7 @@ import {
   createPlayerMesh,
   createFirstPersonViewmodel,
   animatePlayerMesh
-} from "./models.js?v=4";
+} from "./models.js?v=5";
 
 const savedProfile = JSON.parse(localStorage.getItem("project_dacha3_profile_v1") || "null");
 
@@ -293,8 +294,9 @@ const seenPackets = new Set();
 const bcChannel = typeof BroadcastChannel !== "undefined" ? new BroadcastChannel("project_dacha_3_sync_v4") : null;
 
 let ntfyConnected = false;
-let mqttClient = null;
-let mqttConnected = false;
+const mqttClients = [];
+const nostrSockets = [];
+const sessionSk = generateSecretKey();
 let peerInstance = null;
 let myPeerId = "";
 const peerConnections = new Map();
@@ -304,7 +306,9 @@ function updateNetBadge() {
   const el = document.getElementById("net-status");
   if (!el) return;
   const peersCount = peerConnections.size;
-  if (ntfyConnected || mqttConnected || peersCount > 0) {
+  const mqttOk = mqttClients.some((c) => c.connected);
+  const nostrOk = nostrSockets.some((w) => w.readyState === WebSocket.OPEN);
+  if (ntfyConnected || mqttOk || nostrOk || peersCount > 0) {
     el.textContent = `🟢 Единый Сервер СНТ #1 (Игроков: ${state.remotePlayers.size + 1})`;
   } else {
     el.textContent = "🟡 Подключение к Серверу СНТ #1...";
@@ -389,10 +393,31 @@ function broadcastNetworkPacket(payload, isWorldState = false) {
     }
   }
 
-  // 3. Единый MQTT-канал
-  if (mqttClient && mqttConnected) {
+  // 3. Брокеры MQTT (работают и с VPN, и без VPN)
+  for (const mc of mqttClients) {
+    if (mc.connected) {
+      try {
+        mc.publish(`${CENTRAL_ROOM_TOPIC}/live`, rawJson, { qos: isWorldState ? 1 : 0, retain: isWorldState });
+      } catch {}
+    }
+  }
+
+  // 4. Глобальные Nostr-релеи (отлично работают через любой VPN без лимитов IP)
+  if (nostrSockets.some((w) => w.readyState === WebSocket.OPEN)) {
     try {
-      mqttClient.publish(`${CENTRAL_ROOM_TOPIC}/live`, rawJson, { qos: isWorldState ? 1 : 0 });
+      const ev = finalizeEvent(
+        {
+          kind: 1,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["t", CENTRAL_ROOM_TOPIC]],
+          content: rawJson
+        },
+        sessionSk
+      );
+      const frame = JSON.stringify(["EVENT", ev]);
+      for (const ws of nostrSockets) {
+        if (ws.readyState === WebSocket.OPEN) ws.send(frame);
+      }
     } catch {}
   }
 
@@ -660,21 +685,48 @@ function initMultiplayerNetwork() {
     });
   } catch {}
 
-  // 3. Подключаем публичный MQTT брокер как дополнительный быстрый канал
-  try {
-    mqttClient = mqtt.connect("wss://broker.emqx.io:8084/mqtt", { connectTimeout: 5000 });
-    mqttClient.on("connect", () => {
-      mqttConnected = true;
-      updateNetBadge();
-      mqttClient.subscribe(`${CENTRAL_ROOM_TOPIC}/live`);
-      if (state.started) sendMyPresenceAndWorldSnapshot();
-    });
-    mqttClient.on("message", (_topic, payload) => {
-      try {
-        handleIncomingPacket(JSON.parse(payload.toString()));
-      } catch {}
-    });
-  } catch {}
+  // 3. Подключаем публичные MQTT брокеры (включая порт 443 и 8084/8884)
+  for (const brokerUrl of [
+    "wss://mqtt.eclipseprojects.io:443/mqtt",
+    "wss://broker.emqx.io:8084/mqtt",
+    "wss://broker.hivemq.com:8884/mqtt"
+  ]) {
+    try {
+      const mc = mqtt.connect(brokerUrl, { connectTimeout: 5000, reconnectPeriod: 4000 });
+      mqttClients.push(mc);
+      mc.on("connect", () => {
+        updateNetBadge();
+        mc.subscribe(`${CENTRAL_ROOM_TOPIC}/live`);
+        if (state.started) sendMyPresenceAndWorldSnapshot();
+      });
+      mc.on("message", (_topic, payload) => {
+        try {
+          handleIncomingPacket(JSON.parse(payload.toString()));
+        } catch {}
+      });
+    } catch {}
+  }
+
+  // 4. Подключаем Nostr-релеи (особенно быстро работают при включённом VPN)
+  for (const relayUrl of ["wss://nos.lol", "wss://relay.damus.io"]) {
+    try {
+      const nws = new WebSocket(relayUrl);
+      nostrSockets.push(nws);
+      nws.onopen = () => {
+        updateNetBadge();
+        nws.send(JSON.stringify(["REQ", "snt-v5", { "#t": [CENTRAL_ROOM_TOPIC], limit: 200 }]));
+        if (state.started) sendMyPresenceAndWorldSnapshot();
+      };
+      nws.onmessage = (ev) => {
+        try {
+          const arr = JSON.parse(ev.data);
+          if (arr[0] === "EVENT" && arr[2] && arr[2].content) {
+            handleIncomingPacket(JSON.parse(arr[2].content));
+          }
+        } catch {}
+      };
+    } catch {}
+  }
 }
 
 // ==========================================
@@ -1839,7 +1891,8 @@ function animate(now) {
   }
 
   netSyncAccum += dt;
-  if (state.started && isMoving && netSyncAccum > 0.25) {
+  const syncInterval = isMoving ? 0.28 : 2.0;
+  if (state.started && netSyncAccum > syncInterval) {
     netSyncAccum = 0;
     const myPlotsCount = Object.values(state.plots).filter((p) => p.ownerKey === state.playerKey).length;
     broadcastNetworkPacket({
@@ -1850,7 +1903,7 @@ function animate(now) {
       y: Number(state.y.toFixed(2)),
       z: Number(state.z.toFixed(2)),
       ry: Number(state.ry.toFixed(2)),
-      anim: state.workTimer > 0 ? "work" : "walk",
+      anim: state.workTimer > 0 ? "work" : isMoving ? "walk" : "idle",
       money: Math.round(state.money),
       plotsCount: myPlotsCount
     });
