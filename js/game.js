@@ -1,0 +1,1485 @@
+import * as THREE from "three";
+import { generateSecretKey, getPublicKey, finalizeEvent } from "nostr-tools/pure";
+import { CHUNK_SIZE, getTerrainHeight, getChunkLayout } from "./world.js";
+import {
+  ITEMS,
+  CROPS,
+  CRAFT_RECIPES,
+  BUILDINGS,
+  SHOP_GOODS,
+  BAZAAR_PRICES,
+  playSfx
+} from "./data.js";
+import {
+  createTerrainChunkMesh,
+  createResourceMesh,
+  createSntEntranceMeshes,
+  createPlotBoundaryMesh,
+  updatePlotSignTexture,
+  createStructureMesh,
+  updateCropVisuals,
+  createPlayerMesh,
+  animatePlayerMesh
+} from "./models.js";
+
+const savedProfile = JSON.parse(localStorage.getItem("project_dacha3_profile_v1") || "null");
+
+const state = {
+  started: false,
+  playerKey: savedProfile?.playerKey || "p_" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36),
+  name: savedProfile?.name || "Артём",
+  color: savedProfile?.color || "#2e7d32",
+  money: savedProfile?.money ?? 500,
+  hunger: savedProfile?.hunger ?? 100,
+  energy: savedProfile?.energy ?? 100,
+  tools: savedProfile?.tools || { axe: false, watering_can: false },
+  inv: savedProfile?.inv || {
+    wood: 2,
+    branch: 3,
+    stone: 1,
+    berry: 4,
+    plank: 4,
+    timber: 0,
+    brick: 0,
+    glass: 0,
+    fertilizer: 1,
+    seed_potato: 2,
+    seed_cucumber: 1,
+    seed_tomato: 0,
+    seed_strawberry: 0,
+    potato: 0,
+    cucumber: 0,
+    tomato: 0,
+    strawberry: 0,
+    jam: 0,
+    pickles: 0,
+    pie: 1
+  },
+  x: 0,
+  y: 0,
+  z: 24,
+  vy: 0,
+  ry: Math.PI,
+  camYaw: 0,
+  camPitch: 0.42,
+  camDist: 11.5,
+  isGrounded: true,
+  workTimer: 0,
+  buildMode: null,
+  buildRot: 0,
+  plots: {},
+  structures: {},
+  harvested: {},
+  berryPickedAt: {},
+  remotePlayers: new Map()
+};
+
+function saveLocalProfile() {
+  try {
+    localStorage.setItem(
+      "project_dacha3_profile_v1",
+      JSON.stringify({
+        playerKey: state.playerKey,
+        name: state.name,
+        color: state.color,
+        money: state.money,
+        hunger: state.hunger,
+        energy: state.energy,
+        tools: state.tools,
+        inv: state.inv
+      })
+    );
+  } catch {}
+}
+
+// ==========================================
+// THREE.JS СЦЕНА И ЧАНКИ МИРА
+// ==========================================
+const canvas = document.getElementById("game-canvas");
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x87ceeb);
+scene.fog = new THREE.FogExp2(0x9be2f8, 0.0052);
+
+const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.2, 260);
+
+const hemiLight = new THREE.HemisphereLight(0xe3f2fd, 0x335c2d, 0.85);
+scene.add(hemiLight);
+
+const sunLight = new THREE.DirectionalLight(0xfff6d6, 1.25);
+sunLight.position.set(45, 75, 35);
+sunLight.castShadow = true;
+sunLight.shadow.mapSize.set(1024, 1024);
+sunLight.shadow.camera.near = 5;
+sunLight.shadow.camera.far = 190;
+const d = 65;
+sunLight.shadow.camera.left = -d;
+sunLight.shadow.camera.right = d;
+sunLight.shadow.camera.top = d;
+sunLight.shadow.camera.bottom = -d;
+scene.add(sunLight);
+scene.add(sunLight.target);
+
+let selfMesh = createPlayerMesh(state.name, state.color);
+scene.add(selfMesh);
+
+const buildGhostGroup = new THREE.Group();
+scene.add(buildGhostGroup);
+
+const structuresRoot = new THREE.Group();
+scene.add(structuresRoot);
+const structureMeshes = new Map();
+const loadedChunks = new Map();
+
+function getNextPlotPrice() {
+  const myPlots = Object.values(state.plots).filter((p) => p.ownerKey === state.playerKey).length;
+  return 300 + myPlots * 150;
+}
+
+function ensureChunksAroundPlayer() {
+  const pcx = Math.floor((state.x + CHUNK_SIZE * 0.5) / CHUNK_SIZE);
+  const pcz = Math.floor((state.z + CHUNK_SIZE * 0.5) / CHUNK_SIZE);
+
+  const needed = new Set();
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dz = -1; dz <= 1; dz++) {
+      const cx = pcx + dx;
+      const cz = pcz + dz;
+      const key = `${cx},${cz}`;
+      needed.add(key);
+      if (!loadedChunks.has(key)) loadChunk(cx, cz);
+    }
+  }
+
+  for (const [key, ch] of loadedChunks.entries()) {
+    if (!needed.has(key)) {
+      scene.remove(ch.group);
+      loadedChunks.delete(key);
+    }
+  }
+}
+
+function loadChunk(cx, cz) {
+  const key = `${cx},${cz}`;
+  const layout = getChunkLayout(cx, cz);
+  const group = new THREE.Group();
+
+  group.add(createTerrainChunkMesh(cx, cz));
+  group.add(createSntEntranceMeshes(layout));
+
+  const plotMeshes = new Map();
+  const price = getNextPlotPrice();
+  for (const p of layout.plots) {
+    const pm = createPlotBoundaryMesh(p, state.plots[p.plotId], price);
+    group.add(pm);
+    plotMeshes.set(p.plotId, pm);
+  }
+
+  const resMeshes = new Map();
+  for (const res of layout.resources) {
+    if (state.harvested[res.id]) continue;
+    const rm = createResourceMesh(res);
+    group.add(rm);
+    resMeshes.set(res.id, rm);
+  }
+
+  scene.add(group);
+  loadedChunks.set(key, { cx, cz, group, layout, plotMeshes, resMeshes });
+}
+
+function refreshAllPlotSigns() {
+  const price = getNextPlotPrice();
+  for (const ch of loadedChunks.values()) {
+    for (const [plotId, pm] of ch.plotMeshes.entries()) {
+      updatePlotSignTexture(pm, state.plots[plotId], price);
+    }
+  }
+}
+
+// ==========================================
+// МУЛЬТИПЛЕЕРНАЯ СИНХРОНИЗАЦИЯ
+// ==========================================
+const netSk = generateSecretKey();
+const netPk = getPublicKey(netSk);
+const seenPackets = new Set();
+const wsRelays = [];
+const bcChannel = typeof BroadcastChannel !== "undefined" ? new BroadcastChannel("project_dacha_3_sync") : null;
+let partySocket = null;
+
+function broadcastNetworkPacket(payload, isWorldState = false) {
+  const pktId = `${state.playerKey}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const fullPkt = { ...payload, pktId, senderKey: state.playerKey, senderId: netPk };
+  seenPackets.add(pktId);
+
+  if (bcChannel) {
+    try { bcChannel.postMessage(fullPkt); } catch {}
+  }
+  if (partySocket && partySocket.readyState === WebSocket.OPEN) {
+    try { partySocket.send(JSON.stringify(fullPkt)); } catch {}
+  }
+
+  const tag = isWorldState ? "project-dacha-3-world-state-v1" : "project-dacha-3-live-pos-v1";
+  try {
+    const ev = finalizeEvent(
+      {
+        kind: 1,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [["t", tag]],
+        content: JSON.stringify(fullPkt)
+      },
+      netSk
+    );
+    const frame = JSON.stringify(["EVENT", ev]);
+    for (const ws of wsRelays) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(frame);
+    }
+  } catch {}
+}
+
+function handleIncomingPacket(pkt) {
+  if (!pkt || !pkt.type) return;
+  if (pkt.pktId) {
+    if (seenPackets.has(pkt.pktId)) return;
+    seenPackets.add(pkt.pktId);
+    if (seenPackets.size > 2000) seenPackets.delete(seenPackets.values().next().value);
+  }
+  if (pkt.senderKey === state.playerKey && pkt.type === "player_moved") return;
+
+  switch (pkt.type) {
+    case "player_moved":
+    case "player_joined": {
+      const pid = pkt.senderKey || pkt.id;
+      if (!pid || pid === state.playerKey) return;
+      let rp = state.remotePlayers.get(pid);
+      if (!rp) {
+        const mesh = createPlayerMesh(pkt.name || "Дачник", pkt.color || "#1565c0");
+        scene.add(mesh);
+        rp = {
+          id: pid,
+          name: pkt.name || "Дачник",
+          color: pkt.color || "#1565c0",
+          x: pkt.x || 0,
+          y: pkt.y || 0,
+          z: pkt.z || 20,
+          tx: pkt.x || 0,
+          tz: pkt.z || 20,
+          ry: pkt.ry || 0,
+          anim: pkt.anim || "idle",
+          money: pkt.money ?? 500,
+          plotsCount: pkt.plotsCount ?? 0,
+          lastSeen: Date.now(),
+          mesh
+        };
+        state.remotePlayers.set(pid, rp);
+        updateOnlineListUI();
+      } else {
+        if (pkt.name && pkt.name !== rp.name) {
+          rp.name = pkt.name;
+          scene.remove(rp.mesh);
+          rp.mesh = createPlayerMesh(rp.name, pkt.color || rp.color);
+          scene.add(rp.mesh);
+        }
+        rp.tx = typeof pkt.x === "number" ? pkt.x : rp.tx;
+        rp.tz = typeof pkt.z === "number" ? pkt.z : rp.tz;
+        rp.ry = typeof pkt.ry === "number" ? pkt.ry : rp.ry;
+        rp.anim = pkt.anim || "idle";
+        if (typeof pkt.money === "number") rp.money = pkt.money;
+        if (typeof pkt.plotsCount === "number") rp.plotsCount = pkt.plotsCount;
+        rp.lastSeen = Date.now();
+      }
+      break;
+    }
+    case "plot_bought": {
+      const p = pkt.plot;
+      if (!p || !p.plotId) return;
+      state.plots[p.plotId] = p;
+      refreshAllPlotSigns();
+      updateHudUI();
+      break;
+    }
+    case "node_harvested": {
+      const nodeId = pkt.nodeId;
+      if (!nodeId) return;
+      state.harvested[nodeId] = { nodeId, permanent: Boolean(pkt.permanent), time: Date.now() };
+      for (const ch of loadedChunks.values()) {
+        const rm = ch.resMeshes.get(nodeId);
+        if (rm) {
+          ch.group.remove(rm);
+          ch.resMeshes.delete(nodeId);
+        }
+      }
+      break;
+    }
+    case "structure_placed": {
+      const s = pkt.structure;
+      if (!s || !s.id) return;
+      state.structures[s.id] = s;
+      spawnOrUpdateStructureMesh(s);
+      break;
+    }
+    case "structure_removed": {
+      const id = pkt.id;
+      if (!id) return;
+      delete state.structures[id];
+      const m = structureMeshes.get(id);
+      if (m) {
+        structuresRoot.remove(m);
+        structureMeshes.delete(id);
+      }
+      break;
+    }
+    case "crop_updated": {
+      const target = state.structures[pkt.id];
+      if (!target) return;
+      target.crop = pkt.crop;
+      target.plantedAt = pkt.plantedAt;
+      target.watered = pkt.watered;
+      break;
+    }
+    case "chat_msg": {
+      if (pkt.message) appendChatLine(pkt.message);
+      break;
+    }
+  }
+}
+
+function initMultiplayerNetwork() {
+  if (bcChannel) bcChannel.onmessage = (ev) => handleIncomingPacket(ev.data);
+
+  const relayUrls = ["wss://nos.lol", "wss://relay.damus.io"];
+  const netStatusEl = document.getElementById("net-status");
+
+  relayUrls.forEach((url) => {
+    try {
+      const ws = new WebSocket(url);
+      wsRelays.push(ws);
+      ws.onopen = () => {
+        netStatusEl.textContent = "Онлайн • СНТ Сеть";
+        ws.send(JSON.stringify(["REQ", "world-state", { "#t": ["project-dacha-3-world-state-v1"], limit: 150 }]));
+        ws.send(JSON.stringify(["REQ", "live-pos", { "#t": ["project-dacha-3-live-pos-v1"], since: Math.floor(Date.now() / 1000) - 25 }]));
+      };
+      ws.onmessage = (ev) => {
+        try {
+          const arr = JSON.parse(ev.data);
+          if (arr[0] === "EVENT" && arr[2] && arr[2].content) {
+            handleIncomingPacket(JSON.parse(arr[2].content));
+          }
+        } catch {}
+      };
+    } catch {}
+  });
+
+  const partyHost = new URLSearchParams(window.location.search).get("party");
+  if (partyHost) {
+    try {
+      const proto = partyHost.startsWith("localhost") ? "ws" : "wss";
+      partySocket = new WebSocket(`${proto}://${partyHost}/party/main`);
+      partySocket.onmessage = (e) => {
+        try { handleIncomingPacket(JSON.parse(e.data)); } catch {}
+      };
+    } catch {}
+  }
+}
+
+// ==========================================
+// ДЕЙСТВИЯ, РЕСУРСЫ, ОГОРОД, СТРОИТЕЛЬСТВО
+// ==========================================
+function spawnOrUpdateStructureMesh(struct) {
+  const old = structureMeshes.get(struct.id);
+  if (old) structuresRoot.remove(old);
+  const mesh = createStructureMesh(struct);
+  structuresRoot.add(mesh);
+  structureMeshes.set(struct.id, mesh);
+}
+
+function getCropProgress(struct) {
+  if (!struct.crop || !struct.plantedAt) return 0;
+  const info = CROPS[struct.crop];
+  if (!info) return 0;
+  const elapsed = (Date.now() - struct.plantedAt) / 1000;
+  let speedMult = 1.0;
+  if (struct.watered) speedMult *= 1.8;
+  if (struct.type === "greenhouse") speedMult *= 1.8;
+  return Math.min(1, (elapsed * speedMult) / info.growSeconds);
+}
+
+function findPlotAt(x, z) {
+  for (const ch of loadedChunks.values()) {
+    for (const p of ch.layout.plots) {
+      if (Math.abs(x - p.x) <= p.w / 2 && Math.abs(z - p.z) <= p.d / 2) return p;
+    }
+  }
+  return null;
+}
+
+function findNearestInteractable() {
+  const px = state.x;
+  const pz = state.z;
+  let best = null;
+  let bestDist = 4.6;
+
+  for (const ch of loadedChunks.values()) {
+    const dShop = Math.hypot(px - ch.layout.shopPos.x, pz - ch.layout.shopPos.z);
+    if (dShop < 4.8 && dShop < bestDist) {
+      bestDist = dShop;
+      best = {
+        kind: "shop",
+        title: `🏪 Магазин «Сельпо» (${ch.layout.sntName})`,
+        sub: "Нажмите [E] или ЛКМ — Купить семена, еду, стройматериалы",
+        data: ch.layout
+      };
+    }
+
+    const dBaz = Math.hypot(px - ch.layout.bazaarPos.x, pz - ch.layout.bazaarPos.z);
+    if (dBaz < 4.8 && dBaz < bestDist) {
+      bestDist = dBaz;
+      best = {
+        kind: "bazaar",
+        title: `⚖️ Дачный Базар (${ch.layout.sntName})`,
+        sub: "Нажмите [E] или ЛКМ — Продать урожай, ягоды, брёвна и заготовки",
+        data: ch.layout
+      };
+    }
+
+    for (const p of ch.layout.plots) {
+      const dSign = Math.hypot(px - p.signX, pz - p.signZ);
+      if (dSign < 3.6 && dSign < bestDist) {
+        const owner = state.plots[p.plotId];
+        bestDist = dSign;
+        if (!owner) {
+          const price = getNextPlotPrice();
+          best = {
+            kind: "buy_plot",
+            title: `🪧 Участок №${p.plotNum} (${p.sntName}) — Свободен`,
+            sub: `Нажмите [E] — Купить участок в собственность за ${price} ₽`,
+            data: p
+          };
+        } else if (owner.ownerKey === state.playerKey) {
+          best = {
+            kind: "own_plot",
+            title: `🏡 Ваш участок №${p.plotNum} (${p.sntName})`,
+            sub: "Нажмите [B] для строительства домов и грядок на своём участке",
+            data: p
+          };
+        } else {
+          best = {
+            kind: "other_plot",
+            title: `🪧 Участок №${p.plotNum} • Владелец: ${owner.ownerName}`,
+            sub: "Частная дачная территория",
+            data: p
+          };
+        }
+      }
+    }
+
+    for (const [, rm] of ch.resMeshes.entries()) {
+      const res = rm.userData.resource;
+      const dist = Math.hypot(px - res.x, pz - res.z);
+      if (dist < 3.4 && dist < bestDist) {
+        bestDist = dist;
+        if (res.kind === "berry_bush") {
+          const pickedTime = state.berryPickedAt[res.id] || 0;
+          const hasBerries = Date.now() - pickedTime > 45_000;
+          best = {
+            kind: "resource",
+            title: hasBerries ? "🍓 Куст с лесными ягодами" : "🌿 Ягодный куст (ягоды собраны)",
+            sub: hasBerries
+              ? "Нажмите [E] или ЛКМ — Собрать спелые ягоды (+3 🍓, +1 🌿)"
+              : "Нажмите [E] — Расчистить куст на ветки (+2 🌿)",
+            data: { res, mesh: rm, hasBerries }
+          };
+        } else if (res.kind === "bush") {
+          best = {
+            kind: "resource",
+            title: "🌿 Дикий кустарник",
+            sub: "Нажмите [E] или ЛКМ — Срубить куст (+2 Ветки 🌿)",
+            data: { res, mesh: rm }
+          };
+        } else if (res.kind === "birch" || res.kind === "pine") {
+          best = {
+            kind: "resource",
+            title: res.kind === "birch" ? "🌳 Русская берёза" : "🌲 Лесная сосна",
+            sub: `Нажмите [E] или ЛКМ — Срубить дерево (+${state.tools.axe ? 4 : 2} Бревна 🪵, +2 Ветки 🌿)`,
+            data: { res, mesh: rm }
+          };
+        } else if (res.kind === "rock") {
+          best = {
+            kind: "resource",
+            title: "🪨 Каменный валун",
+            sub: "Нажмите [E] или ЛКМ — Добыть камень (+3 Камня 🪨)",
+            data: { res, mesh: rm }
+          };
+        }
+      }
+    }
+  }
+
+  for (const s of Object.values(state.structures)) {
+    if (s.type === "bed" || s.type === "greenhouse") {
+      const dist = Math.hypot(px - s.x, pz - s.z);
+      if (dist < 3.5 && dist < bestDist) {
+        bestDist = dist;
+        const prog = getCropProgress(s);
+        if (!s.crop) {
+          best = {
+            kind: "garden",
+            title: s.type === "greenhouse" ? "🏡 Свободная теплица" : "🌱 Свободная грядка",
+            sub: "Нажмите [E] — Посадить семена (картофель, огурцы, томаты, клубника)",
+            data: s
+          };
+        } else if (prog >= 1) {
+          best = {
+            kind: "garden",
+            title: `✅ Урожай созрел: ${CROPS[s.crop].name}!`,
+            sub: "Нажмите [E] — Собрать свежий урожай в рюкзак",
+            data: s
+          };
+        } else {
+          best = {
+            kind: "garden",
+            title: `🌱 Растёт: ${CROPS[s.crop].name} (${Math.floor(prog * 100)}%)`,
+            sub: "Нажмите [E] — Полить грядку или внести удобрение для ускорения роста",
+            data: s
+          };
+        }
+      }
+    }
+  }
+
+  return best;
+}
+
+function executeInteraction(target) {
+  if (!target) return;
+  state.workTimer = 0.38;
+
+  if (target.kind === "shop") return openShopModal();
+  if (target.kind === "bazaar") return openBazaarModal();
+  if (target.kind === "own_plot") return openBuildModal();
+
+  if (target.kind === "buy_plot") {
+    const plot = target.data;
+    const price = getNextPlotPrice();
+    if (state.money < price) {
+      showToast(`❌ Недостаточно денег! Нужно ${price} ₽ (продайте ягоды или урожай на Базаре).`);
+      return;
+    }
+    state.money -= price;
+    const ownership = {
+      plotId: plot.plotId,
+      sntName: plot.sntName,
+      plotNum: plot.plotNum,
+      ownerKey: state.playerKey,
+      ownerName: state.name,
+      color: state.color,
+      boughtAt: Date.now()
+    };
+    state.plots[plot.plotId] = ownership;
+    playSfx("coin");
+    refreshAllPlotSigns();
+    updateHudUI();
+    saveLocalProfile();
+    broadcastNetworkPacket({ type: "plot_bought", plot: ownership }, true);
+    showToast(`🎉 Вы купили Участок №${plot.plotNum} в ${plot.sntName}! Стройте дома и грядки [B]!`);
+    return;
+  }
+
+  if (target.kind === "resource") {
+    const { res, mesh, hasBerries } = target.data;
+    if (res.kind === "berry_bush" && hasBerries) {
+      state.berryPickedAt[res.id] = Date.now();
+      if (mesh.userData.berriesGroup) mesh.userData.berriesGroup.visible = false;
+      state.inv.berry = (state.inv.berry || 0) + 3;
+      state.inv.branch = (state.inv.branch || 0) + 1;
+      playSfx("pick");
+      showToast("🍓 Собрано: +3 Лесные ягоды, +1 Ветки (нажмите [F], чтобы поесть!)");
+      updateHudUI();
+      saveLocalProfile();
+      return;
+    }
+
+    if (res.onPlotId) {
+      const plotOwner = state.plots[res.onPlotId];
+      if (plotOwner && plotOwner.ownerKey !== state.playerKey) {
+        showToast(`⚠️ Этот участок принадлежит дачнику ${plotOwner.ownerName}!`);
+        return;
+      }
+    }
+
+    playSfx("chop");
+    if (res.kind === "birch" || res.kind === "pine") {
+      const woodGain = state.tools.axe ? 4 : 2;
+      state.inv.wood = (state.inv.wood || 0) + woodGain;
+      state.inv.branch = (state.inv.branch || 0) + 2;
+      showToast(`🪵 Дерево срублено: +${woodGain} Бревна, +2 Ветки`);
+    } else if (res.kind === "rock") {
+      state.inv.stone = (state.inv.stone || 0) + 3;
+      showToast("🪨 Добыто: +3 Камня");
+    } else {
+      state.inv.branch = (state.inv.branch || 0) + 2;
+      showToast("🌿 Куст расчищен: +2 Ветки");
+    }
+
+    state.hunger = Math.max(0, state.hunger - 1.2);
+    const permanent = Boolean(res.onPlotId);
+    state.harvested[res.id] = { nodeId: res.id, permanent, time: Date.now() };
+
+    for (const ch of loadedChunks.values()) {
+      if (ch.resMeshes.has(res.id)) {
+        ch.group.remove(mesh);
+        ch.resMeshes.delete(res.id);
+      }
+    }
+
+    broadcastNetworkPacket({ type: "node_harvested", nodeId: res.id, permanent, x: res.x, z: res.z, kind: res.kind }, true);
+    updateHudUI();
+    saveLocalProfile();
+    return;
+  }
+
+  if (target.kind === "garden") {
+    const struct = target.data;
+    const prog = getCropProgress(struct);
+    if (!struct.crop) {
+      openGardenPlantModal(struct);
+    } else if (prog >= 1) {
+      const cInfo = CROPS[struct.crop];
+      const count = cInfo.yieldCount + (struct.type === "greenhouse" ? 2 : 0);
+      state.inv[cInfo.produceItem] = (state.inv[cInfo.produceItem] || 0) + count;
+      struct.crop = null;
+      struct.plantedAt = 0;
+      struct.watered = false;
+      playSfx("pick");
+      showToast(`🧺 Собран урожай: +${count} ${cInfo.name}! Можно съесть или продать на Базаре!`);
+      broadcastNetworkPacket({ type: "crop_updated", id: struct.id, crop: null, plantedAt: 0, watered: false }, true);
+      updateHudUI();
+      saveLocalProfile();
+    } else {
+      openGardenCareModal(struct);
+    }
+  }
+}
+
+function eatFoodAction() {
+  const foodOrder = ["pie", "pickles", "jam", "strawberry", "tomato", "cucumber", "potato", "berry"];
+  for (const key of foodOrder) {
+    if ((state.inv[key] || 0) > 0) {
+      state.inv[key]--;
+      const gain = ITEMS[key].food || 20;
+      state.hunger = Math.min(100, state.hunger + gain);
+      state.energy = Math.min(100, state.energy + Math.round(gain * 0.6));
+      playSfx("pick");
+      showToast(`😋 Вы съели «${ITEMS[key].name}» (+${gain}% сытости)!`);
+      updateHudUI();
+      saveLocalProfile();
+      return;
+    }
+  }
+  showToast("🍓 Нет еды в рюкзаке! Соберите лесные ягоды с кустов [E] или купите пирожок в Магазине!");
+}
+
+// ==========================================
+// МОДАЛЬНЫЕ ОКНА
+// ==========================================
+const modalBackdrop = document.getElementById("modal-backdrop");
+const modalTitle = document.getElementById("modal-title");
+const modalSubtitle = document.getElementById("modal-subtitle");
+const modalBody = document.getElementById("modal-body");
+
+function closeModal() { modalBackdrop.style.display = "none"; }
+document.getElementById("modal-close").addEventListener("click", closeModal);
+modalBackdrop.addEventListener("click", (e) => { if (e.target === modalBackdrop) closeModal(); });
+
+function formatCostObject(cost) {
+  return Object.entries(cost)
+    .map(([k, v]) => `${ITEMS[k]?.icon || ""} ${ITEMS[k]?.name || k}: ${v} (у вас: ${state.inv[k] || 0})`)
+    .join(" • ");
+}
+function hasResources(cost) {
+  return Object.entries(cost).every(([k, v]) => (state.inv[k] || 0) >= v);
+}
+function consumeResources(cost) {
+  for (const [k, v] of Object.entries(cost)) state.inv[k] = Math.max(0, (state.inv[k] || 0) - v);
+}
+
+function openCraftModal() {
+  modalTitle.textContent = "🪚 Переработка ресурсов и Крафт";
+  modalSubtitle.textContent = "Перерабатывайте брёвна, камень, ветки и урожай в стройматериалы, инструменты и консервы:";
+  modalBody.innerHTML = "";
+  CRAFT_RECIPES.forEach((r) => {
+    const can = hasResources(r.cost) && (!r.tool || !state.tools[r.tool]);
+    const card = document.createElement("div");
+    card.className = "card-item";
+    card.innerHTML = `
+      <div><div class="card-title">${r.title}</div><div class="card-desc">${r.desc}</div></div>
+      <div class="card-cost">Требуется: ${formatCostObject(r.cost)}</div>
+      <button class="card-btn" ${can ? "" : "disabled"}>${r.tool && state.tools[r.tool] ? "✅ Уже создано" : "Изготовить"}</button>
+    `;
+    card.querySelector("button").addEventListener("click", () => {
+      if (!hasResources(r.cost)) return;
+      consumeResources(r.cost);
+      if (r.tool) { state.tools[r.tool] = true; showToast(`🛠️ Создан инструмент: ${r.title}!`); }
+      if (r.out) {
+        for (const [k, v] of Object.entries(r.out)) state.inv[k] = (state.inv[k] || 0) + v;
+        showToast(`✅ Изготовлено: ${r.title}!`);
+      }
+      playSfx("build");
+      updateHudUI();
+      saveLocalProfile();
+      openCraftModal();
+    });
+    modalBody.appendChild(card);
+  });
+  modalBackdrop.style.display = "flex";
+}
+
+function openBuildModal() {
+  modalTitle.textContent = "🏡 Строительство домов и Огород";
+  const myPlotsCount = Object.values(state.plots).filter((p) => p.ownerKey === state.playerKey).length;
+  modalSubtitle.textContent = myPlotsCount > 0
+    ? `У вас участков: ${myPlotsCount}. Выберите постройку и разместите её на своей даче:`
+    : "💡 Совет: купите участок за 300 ₽ у таблички в СНТ, чтобы закрепить за собой территорию!";
+  modalBody.innerHTML = "";
+  BUILDINGS.forEach((b) => {
+    const can = hasResources(b.cost);
+    const card = document.createElement("div");
+    card.className = "card-item";
+    card.innerHTML = `
+      <div><div class="card-title">${b.name}</div><div class="card-desc">${b.desc}</div></div>
+      <div class="card-cost">Материалы: ${formatCostObject(b.cost)}</div>
+      <button class="card-btn" ${can ? "" : "disabled"}>Выбрать для постройки</button>
+    `;
+    card.querySelector("button").addEventListener("click", () => {
+      if (!hasResources(b.cost)) return;
+      closeModal();
+      enterBuildMode(b);
+    });
+    modalBody.appendChild(card);
+  });
+  modalBackdrop.style.display = "flex";
+}
+
+function openShopModal() {
+  modalTitle.textContent = `🏪 Магазин «Сельпо» (Баланс: ${state.money} ₽)`;
+  modalSubtitle.textContent = "Покупка семян для огорода, горячей еды и готовых стройматериалов:";
+  modalBody.innerHTML = "";
+  SHOP_GOODS.forEach((g) => {
+    const can = state.money >= g.price;
+    const card = document.createElement("div");
+    card.className = "card-item";
+    card.innerHTML = `
+      <div><div class="card-title">${g.title}</div><div class="card-desc">${g.desc}</div></div>
+      <div class="card-cost">Цена: ${g.price} ₽</div>
+      <button class="card-btn" ${can ? "" : "disabled"}>Купить за ${g.price} ₽</button>
+    `;
+    card.querySelector("button").addEventListener("click", () => {
+      if (state.money < g.price) return;
+      state.money -= g.price;
+      for (const [k, v] of Object.entries(g.out)) state.inv[k] = (state.inv[k] || 0) + v;
+      playSfx("coin");
+      showToast(`🛒 Куплено: ${g.title}`);
+      updateHudUI();
+      saveLocalProfile();
+      openShopModal();
+    });
+    modalBody.appendChild(card);
+  });
+  modalBackdrop.style.display = "flex";
+}
+
+function openBazaarModal() {
+  modalTitle.textContent = `⚖️ Дачный Базар • Скупка (Баланс: ${state.money} ₽)`;
+  modalSubtitle.textContent = "Продавайте лесные ягоды, древесину, урожай с огорода и домашние заготовки, чтобы покупать соседние участки:";
+  modalBody.innerHTML = "";
+  BAZAAR_PRICES.forEach((entry) => {
+    const info = ITEMS[entry.item];
+    const count = state.inv[entry.item] || 0;
+    const card = document.createElement("div");
+    card.className = "card-item";
+    card.innerHTML = `
+      <div><div class="card-title">${info.icon} ${info.name} (В наличии: ${count})</div><div class="card-desc">${entry.desc}</div></div>
+      <div class="card-cost">Скупочная цена: ${entry.price} ₽ / шт.</div>
+      <div style="display:flex;gap:6px;">
+        <button class="card-btn btn-sell-one" style="flex:1;" ${count >= 1 ? "" : "disabled"}>Продать 1 (+${entry.price} ₽)</button>
+        <button class="card-btn btn-sell-all" style="flex:1;background:#ef6c00;" ${count >= 1 ? "" : "disabled"}>Все (+${count * entry.price} ₽)</button>
+      </div>
+    `;
+    card.querySelector(".btn-sell-one").addEventListener("click", () => {
+      if ((state.inv[entry.item] || 0) < 1) return;
+      state.inv[entry.item]--;
+      state.money += entry.price;
+      playSfx("coin");
+      showToast(`💰 Продано: 1x ${info.name} (+${entry.price} ₽)`);
+      updateHudUI();
+      saveLocalProfile();
+      openBazaarModal();
+    });
+    card.querySelector(".btn-sell-all").addEventListener("click", () => {
+      const c = state.inv[entry.item] || 0;
+      if (c < 1) return;
+      const sum = c * entry.price;
+      state.inv[entry.item] = 0;
+      state.money += sum;
+      playSfx("coin");
+      showToast(`💰 Продано всё (${c}x ${info.name}) за ${sum} ₽!`);
+      updateHudUI();
+      saveLocalProfile();
+      openBazaarModal();
+    });
+    modalBody.appendChild(card);
+  });
+  modalBackdrop.style.display = "flex";
+}
+
+function openGardenPlantModal(struct) {
+  modalTitle.textContent = struct.type === "greenhouse" ? "🏡 Посадка в теплице" : "🌱 Посадка на грядке";
+  modalSubtitle.textContent = "Выберите культуру для посадки (семена продаются в Магазине «Сельпо»):";
+  modalBody.innerHTML = "";
+  Object.values(CROPS).forEach((crop) => {
+    const have = state.inv[crop.seedItem] || 0;
+    const card = document.createElement("div");
+    card.className = "card-item";
+    card.innerHTML = `
+      <div><div class="card-title">${ITEMS[crop.produceItem].icon} ${crop.name}</div><div class="card-desc">Созревание: ~${crop.growSeconds} сек. Урожай: ${crop.yieldCount} шт.</div></div>
+      <div class="card-cost">Семена в наличии: ${have} шт.</div>
+      <button class="card-btn" ${have > 0 ? "" : "disabled"}>Посадить ${crop.name}</button>
+    `;
+    card.querySelector("button").addEventListener("click", () => {
+      if ((state.inv[crop.seedItem] || 0) < 1) return;
+      state.inv[crop.seedItem]--;
+      struct.crop = crop.id;
+      struct.plantedAt = Date.now();
+      struct.watered = state.tools.watering_can;
+      playSfx("pick");
+      showToast(`🌱 Вы посадили «${crop.name}»!`);
+      broadcastNetworkPacket({ type: "crop_updated", id: struct.id, crop: struct.crop, plantedAt: struct.plantedAt, watered: struct.watered }, true);
+      updateHudUI();
+      saveLocalProfile();
+      closeModal();
+    });
+    modalBody.appendChild(card);
+  });
+  modalBackdrop.style.display = "flex";
+}
+
+function openGardenCareModal(struct) {
+  const cInfo = CROPS[struct.crop];
+  modalTitle.textContent = `🌱 Уход за грядкой: ${cInfo?.name || ""}`;
+  modalSubtitle.textContent = "Ускорьте созревание урожая поливом или био-удобрением:";
+  modalBody.innerHTML = "";
+
+  const waterCard = document.createElement("div");
+  waterCard.className = "card-item";
+  waterCard.innerHTML = `
+    <div><div class="card-title">💧 Полить грядку водой</div><div class="card-desc">Увлажняет почву и ускоряет рост растений почти в 2 раза.</div></div>
+    <div class="card-cost">${struct.watered ? "✅ Грядка уже полита" : "Бесплатно"}</div>
+    <button class="card-btn" ${struct.watered ? "disabled" : ""}>Полить грядку</button>
+  `;
+  waterCard.querySelector("button").addEventListener("click", () => {
+    struct.watered = true;
+    playSfx("pick");
+    showToast("💧 Грядка полита! Рост ускорен.");
+    broadcastNetworkPacket({ type: "crop_updated", id: struct.id, crop: struct.crop, plantedAt: struct.plantedAt, watered: true }, true);
+    closeModal();
+  });
+  modalBody.appendChild(waterCard);
+
+  const fertCount = state.inv.fertilizer || 0;
+  const fertCard = document.createElement("div");
+  fertCard.className = "card-item";
+  fertCard.innerHTML = `
+    <div><div class="card-title">🧪 Внести удобрение (В наличии: ${fertCount})</div><div class="card-desc">Мгновенно созревает урожай на 100%!</div></div>
+    <div class="card-cost">Требуется: 1 Удобрение</div>
+    <button class="card-btn" ${fertCount > 0 ? "" : "disabled"}>Удобрить сейчас</button>
+  `;
+  fertCard.querySelector("button").addEventListener("click", () => {
+    if ((state.inv.fertilizer || 0) < 1) return;
+    state.inv.fertilizer--;
+    struct.plantedAt = Date.now() - 120_000;
+    struct.watered = true;
+    playSfx("build");
+    showToast("✨ Урожай мгновенно созрел благодаря удобрению!");
+    broadcastNetworkPacket({ type: "crop_updated", id: struct.id, crop: struct.crop, plantedAt: struct.plantedAt, watered: true }, true);
+    updateHudUI();
+    saveLocalProfile();
+    closeModal();
+  });
+  modalBody.appendChild(fertCard);
+  modalBackdrop.style.display = "flex";
+}
+
+// ==========================================
+// СТРОИТЕЛЬСТВО
+// ==========================================
+const buildBanner = document.getElementById("build-banner");
+const buildSelectedName = document.getElementById("build-selected-name");
+
+function enterBuildMode(buildingDef) {
+  state.buildMode = buildingDef;
+  buildSelectedName.textContent = buildingDef.name;
+  buildBanner.style.display = "block";
+  while (buildGhostGroup.children.length > 0) buildGhostGroup.remove(buildGhostGroup.children[0]);
+  const ghost = createStructureMesh({ id: "ghost", type: buildingDef.type, x: 0, z: 0, rot: state.buildRot });
+  ghost.traverse((child) => {
+    if (child.isMesh) {
+      child.material = child.material.clone();
+      child.material.transparent = true;
+      child.material.opacity = 0.62;
+    }
+  });
+  buildGhostGroup.add(ghost);
+  buildGhostGroup.visible = true;
+}
+
+function exitBuildMode() {
+  state.buildMode = null;
+  buildBanner.style.display = "none";
+  buildGhostGroup.visible = false;
+}
+
+function getBuildPreviewCoords() {
+  const dist = 4.6;
+  const gx = state.x - Math.sin(state.ry) * dist;
+  const gz = state.z - Math.cos(state.ry) * dist;
+  return { x: gx, y: getTerrainHeight(gx, gz), z: gz };
+}
+
+function confirmPlaceBuilding() {
+  const b = state.buildMode;
+  if (!b) return;
+  if (!hasResources(b.cost)) {
+    showToast("❌ Не хватает стройматериалов!");
+    exitBuildMode();
+    return;
+  }
+  const pos = getBuildPreviewCoords();
+  const plot = findPlotAt(pos.x, pos.z);
+  if (plot) {
+    const owner = state.plots[plot.plotId];
+    if (owner && owner.ownerKey !== state.playerKey) {
+      showToast(`⚠️ Нельзя строить на участке игрока ${owner.ownerName}!`);
+      return;
+    }
+  }
+  consumeResources(b.cost);
+  const struct = {
+    id: `st_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    type: b.type,
+    x: Number(pos.x.toFixed(2)),
+    y: Number(pos.y.toFixed(2)),
+    z: Number(pos.z.toFixed(2)),
+    rot: state.buildRot,
+    plotId: plot ? plot.plotId : "",
+    ownerKey: state.playerKey,
+    ownerName: state.name,
+    crop: null,
+    plantedAt: 0,
+    watered: false
+  };
+  state.structures[struct.id] = struct;
+  spawnOrUpdateStructureMesh(struct);
+  playSfx("build");
+  showToast(`🏡 Построено: ${b.name}!`);
+  broadcastNetworkPacket({ type: "structure_placed", structure: struct }, true);
+  updateHudUI();
+  saveLocalProfile();
+  if (!hasResources(b.cost)) exitBuildMode();
+}
+
+function demolishNearestStructure() {
+  let nearest = null;
+  let bestD = 4.5;
+  for (const s of Object.values(state.structures)) {
+    const d = Math.hypot(state.x - s.x, state.z - s.z);
+    if (d < bestD) { bestD = d; nearest = s; }
+  }
+  if (!nearest) return showToast("Рядом нет построек для сноса.");
+  if (nearest.ownerKey && nearest.ownerKey !== state.playerKey) {
+    return showToast(`⚠️ Это постройка игрока ${nearest.ownerName}!`);
+  }
+  delete state.structures[nearest.id];
+  const m = structureMeshes.get(nearest.id);
+  if (m) { structuresRoot.remove(m); structureMeshes.delete(nearest.id); }
+  playSfx("chop");
+  showToast("🔨 Постройка разобрана.");
+  broadcastNetworkPacket({ type: "structure_removed", id: nearest.id }, true);
+}
+
+// ==========================================
+// ВВОД, HUD И МИНИ-КАРТА
+// ==========================================
+const keys = {};
+window.addEventListener("keydown", (e) => {
+  if (document.activeElement === document.getElementById("chat-input") ||
+      document.activeElement === document.getElementById("nickname-input")) {
+    if (e.key === "Enter" && document.activeElement === document.getElementById("chat-input")) sendChatFromInput();
+    return;
+  }
+  const k = e.code;
+  keys[k] = true;
+  if (!state.started) return;
+
+  if (k === "KeyE") {
+    if (state.buildMode) confirmPlaceBuilding();
+    else executeInteraction(findNearestInteractable());
+  } else if (k === "KeyF") eatFoodAction();
+  else if (k === "KeyC") openCraftModal();
+  else if (k === "KeyB") { if (state.buildMode) exitBuildMode(); else openBuildModal(); }
+  else if (k === "KeyM") openShopModal();
+  else if (k === "KeyN") openBazaarModal();
+  else if (k === "KeyR" && state.buildMode) state.buildRot = (state.buildRot + Math.PI / 2) % (Math.PI * 2);
+  else if (k === "KeyX") demolishNearestStructure();
+  else if (k === "Escape") { closeModal(); exitBuildMode(); }
+  else if (k === "Enter") document.getElementById("chat-input").focus();
+});
+window.addEventListener("keyup", (e) => { keys[e.code] = false; });
+
+let isDraggingCam = false;
+let dragMoved = false;
+let lastMouseX = 0;
+let lastMouseY = 0;
+
+canvas.addEventListener("mousedown", (e) => {
+  isDraggingCam = true;
+  dragMoved = false;
+  lastMouseX = e.clientX;
+  lastMouseY = e.clientY;
+});
+window.addEventListener("mousemove", (e) => {
+  if (!isDraggingCam) return;
+  const dx = e.clientX - lastMouseX;
+  const dy = e.clientY - lastMouseY;
+  if (Math.abs(dx) > 3 || Math.abs(dy) > 3) dragMoved = true;
+  lastMouseX = e.clientX;
+  lastMouseY = e.clientY;
+  state.camYaw -= dx * 0.0065;
+  state.camPitch = Math.max(0.15, Math.min(1.25, state.camPitch + dy * 0.0055));
+});
+window.addEventListener("mouseup", (e) => {
+  if (isDraggingCam && !dragMoved && state.started && e.button === 0) {
+    if (state.buildMode) confirmPlaceBuilding();
+    else executeInteraction(findNearestInteractable());
+  }
+  isDraggingCam = false;
+});
+canvas.addEventListener("contextmenu", (e) => { e.preventDefault(); if (state.buildMode) exitBuildMode(); });
+canvas.addEventListener("wheel", (e) => { state.camDist = Math.max(4.5, Math.min(24, state.camDist + e.deltaY * 0.01)); });
+window.addEventListener("resize", () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+document.getElementById("btn-eat").addEventListener("click", eatFoodAction);
+document.getElementById("btn-craft").addEventListener("click", openCraftModal);
+document.getElementById("btn-build").addEventListener("click", openBuildModal);
+document.getElementById("btn-shop").addEventListener("click", openShopModal);
+document.getElementById("btn-bazaar").addEventListener("click", openBazaarModal);
+document.getElementById("interact-prompt").addEventListener("click", () => executeInteraction(findNearestInteractable()));
+
+function appendChatLine(msg) {
+  const box = document.getElementById("chat-messages");
+  const div = document.createElement("div");
+  div.className = "chat-line";
+  const senderSpan = document.createElement("b");
+  senderSpan.style.color = msg.color || "#ffd54f";
+  senderSpan.textContent = `${msg.sender || "Дачник"}: `;
+  const textSpan = document.createElement("span");
+  textSpan.textContent = msg.text || "";
+  div.append(senderSpan, textSpan);
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+}
+
+function sendChatFromInput() {
+  const inp = document.getElementById("chat-input");
+  const text = inp.value.trim();
+  inp.value = "";
+  inp.blur();
+  if (!text) return;
+  const msg = { id: `${Date.now()}`, sender: state.name, color: state.color, text, time: Date.now() };
+  appendChatLine(msg);
+  broadcastNetworkPacket({ type: "chat_msg", message: msg }, true);
+}
+document.getElementById("chat-send").addEventListener("click", sendChatFromInput);
+
+function showToast(text) {
+  const cont = document.getElementById("toast-container");
+  const el = document.createElement("div");
+  el.className = "toast-msg";
+  el.textContent = text;
+  cont.appendChild(el);
+  setTimeout(() => el.remove(), 2800);
+}
+
+function updateHudUI() {
+  document.getElementById("hud-player-name").textContent = state.name;
+  document.getElementById("hud-color-dot").style.background = state.color;
+  document.getElementById("hud-money").textContent = `${Math.round(state.money)} ₽`;
+  const myPlotsCount = Object.values(state.plots).filter((p) => p.ownerKey === state.playerKey).length;
+  document.getElementById("hud-plots").textContent = `Участков: ${myPlotsCount}`;
+
+  const hPct = Math.round(state.hunger);
+  const ePct = Math.round(state.energy);
+  document.getElementById("bar-hunger").style.width = `${hPct}%`;
+  document.getElementById("val-hunger").textContent = `${hPct}%`;
+  document.getElementById("bar-energy").style.width = `${ePct}%`;
+  document.getElementById("val-energy").textContent = `${ePct}%`;
+
+  const toolsEl = document.getElementById("hud-tools");
+  toolsEl.innerHTML = "";
+  if (state.tools.axe) toolsEl.innerHTML += `<span class="tool-chip">🪓 Стальной топор (x2 дерево)</span>`;
+  if (state.tools.watering_can) toolsEl.innerHTML += `<span class="tool-chip">🚿 Садовая лейка</span>`;
+  if (!state.tools.axe && !state.tools.watering_can) toolsEl.innerHTML = `<span class="tool-chip">✋ Ручной сбор</span>`;
+
+  const invBar = document.getElementById("inventory-bar");
+  invBar.innerHTML = "";
+  Object.entries(ITEMS).forEach(([key, info]) => {
+    const cnt = state.inv[key] || 0;
+    if (cnt <= 0 && !["wood", "branch", "stone", "berry", "plank"].includes(key)) return;
+    const slot = document.createElement("div");
+    slot.className = "inv-slot";
+    slot.title = info.food ? `${info.name} (Кликните, чтобы съесть: +${info.food}% сытости)` : info.name;
+    slot.innerHTML = `<span>${info.icon}</span><span>${info.name}</span><span class="cnt">${cnt}</span>`;
+    if (info.food && cnt > 0) {
+      slot.addEventListener("click", () => {
+        state.inv[key]--;
+        state.hunger = Math.min(100, state.hunger + info.food);
+        playSfx("pick");
+        showToast(`😋 Съедено: ${info.name} (+${info.food}% сытости)`);
+        updateHudUI();
+        saveLocalProfile();
+      });
+    }
+    invBar.appendChild(slot);
+  });
+
+  updateOnlineListUI();
+}
+
+function updateOnlineListUI() {
+  const listEl = document.getElementById("online-list");
+  listEl.innerHTML = "";
+  const myPlotsCount = Object.values(state.plots).filter((p) => p.ownerKey === state.playerKey).length;
+  const all = [{ name: `${state.name} (Вы)`, color: state.color, plots: myPlotsCount, money: state.money }];
+  for (const rp of state.remotePlayers.values()) {
+    if (Date.now() - rp.lastSeen < 45_000) {
+      all.push({ name: rp.name, color: rp.color, plots: rp.plotsCount || 0, money: rp.money || 500 });
+    }
+  }
+  document.getElementById("online-count").textContent = String(all.length);
+  all.forEach((p) => {
+    const row = document.createElement("div");
+    row.className = "online-item";
+    row.innerHTML = `<span style="color:${p.color};font-weight:700;">● ${p.name}</span><span>${p.plots} уч. • ${p.money} ₽</span>`;
+    listEl.appendChild(row);
+  });
+}
+
+const minimapCanvas = document.getElementById("minimap-canvas");
+const mmCtx = minimapCanvas.getContext("2d");
+
+function renderMinimap() {
+  const w = minimapCanvas.width;
+  const h = minimapCanvas.height;
+  const scale = 1.15;
+  mmCtx.fillStyle = "#1c331e";
+  mmCtx.fillRect(0, 0, w, h);
+
+  const toScreen = (wx, wz) => [w / 2 + (wx - state.x) * scale, h / 2 + (wz - state.z) * scale];
+
+  for (const ch of loadedChunks.values()) {
+    const [rx1, rz1] = toScreen(ch.centerX - 46, ch.centerZ);
+    const [rx2, rz2] = toScreen(ch.centerX + 46, ch.centerZ);
+    mmCtx.strokeStyle = "#8d6e4c";
+    mmCtx.lineWidth = 5;
+    mmCtx.beginPath();
+    mmCtx.moveTo(rx1, rz1);
+    mmCtx.lineTo(rx2, rz2);
+    mmCtx.stroke();
+
+    const [ex1, ez1] = toScreen(ch.centerX, ch.centerZ);
+    const [ex2, ez2] = toScreen(ch.centerX, ch.centerZ + 44);
+    mmCtx.beginPath();
+    mmCtx.moveTo(ex1, ez1);
+    mmCtx.lineTo(ex2, ez2);
+    mmCtx.stroke();
+
+    for (const p of ch.layout.plots) {
+      const [sx, sz] = toScreen(p.x - p.w / 2, p.z - p.d / 2);
+      const own = state.plots[p.plotId];
+      if (!own) {
+        mmCtx.fillStyle = "rgba(255, 213, 79, 0.25)";
+        mmCtx.strokeStyle = "#ffd54f";
+      } else if (own.ownerKey === state.playerKey) {
+        mmCtx.fillStyle = "rgba(102, 187, 106, 0.45)";
+        mmCtx.strokeStyle = "#69f0ae";
+      } else {
+        mmCtx.fillStyle = "rgba(41, 182, 246, 0.38)";
+        mmCtx.strokeStyle = "#29b6f6";
+      }
+      mmCtx.lineWidth = 1.5;
+      mmCtx.fillRect(sx, sz, p.w * scale, p.d * scale);
+      mmCtx.strokeRect(sx, sz, p.w * scale, p.d * scale);
+    }
+
+    const [shX, shZ] = toScreen(ch.layout.shopPos.x, ch.layout.shopPos.z);
+    mmCtx.fillStyle = "#ffd54f";
+    mmCtx.fillRect(shX - 4, shZ - 4, 8, 8);
+
+    const [bzX, bzZ] = toScreen(ch.layout.bazaarPos.x, ch.layout.bazaarPos.z);
+    mmCtx.fillStyle = "#ff7043";
+    mmCtx.fillRect(bzX - 4, bzZ - 4, 8, 8);
+  }
+
+  for (const rp of state.remotePlayers.values()) {
+    const [px, pz] = toScreen(rp.x, rp.z);
+    mmCtx.fillStyle = rp.color || "#29b6f6";
+    mmCtx.beginPath();
+    mmCtx.arc(px, pz, 4, 0, Math.PI * 2);
+    mmCtx.fill();
+  }
+
+  mmCtx.fillStyle = "#ffffff";
+  mmCtx.beginPath();
+  mmCtx.arc(w / 2, h / 2, 4.5, 0, Math.PI * 2);
+  mmCtx.fill();
+
+  const hVal = getTerrainHeight(state.x, state.z);
+  document.getElementById("minimap-coords").textContent =
+    `X: ${Math.round(state.x)} • Z: ${Math.round(state.z)} • Рельеф: ${hVal >= 0 ? "+" : ""}${hVal.toFixed(1)}м`;
+}
+
+// ==========================================
+// СТАРТ И ИГРОВОЙ ЦИКЛ
+// ==========================================
+const nickInput = document.getElementById("nickname-input");
+nickInput.value = state.name;
+
+document.querySelectorAll(".color-swatch").forEach((sw) => {
+  if (sw.dataset.color === state.color) {
+    document.querySelectorAll(".color-swatch").forEach((s) => s.classList.remove("active"));
+    sw.classList.add("active");
+  }
+  sw.addEventListener("click", () => {
+    document.querySelectorAll(".color-swatch").forEach((s) => s.classList.remove("active"));
+    sw.classList.add("active");
+    state.color = sw.dataset.color;
+  });
+});
+
+function startGame() {
+  state.name = nickInput.value.trim().slice(0, 20) || "Артём";
+  state.started = true;
+  saveLocalProfile();
+
+  document.getElementById("login-overlay").style.display = "none";
+  document.getElementById("hud").style.display = "block";
+
+  scene.remove(selfMesh);
+  selfMesh = createPlayerMesh(state.name, state.color);
+  scene.add(selfMesh);
+
+  ensureChunksAroundPlayer();
+  updateHudUI();
+  initMultiplayerNetwork();
+
+  appendChatLine({
+    sender: "СНТ-Инфо",
+    color: "#81c784",
+    text: `Добро пожаловать, ${state.name}! У вас 500 ₽ — подойдите к табличке любого участка и нажмите [E], чтобы купить дачу за 300 ₽!`
+  });
+
+  const myPlotsCount = Object.values(state.plots).filter((p) => p.ownerKey === state.playerKey).length;
+  broadcastNetworkPacket({
+    type: "player_joined",
+    name: state.name,
+    color: state.color,
+    x: state.x,
+    y: state.y,
+    z: state.z,
+    ry: state.ry,
+    money: state.money,
+    plotsCount: myPlotsCount
+  });
+}
+
+document.getElementById("start-game-btn").addEventListener("click", startGame);
+nickInput.addEventListener("keydown", (e) => { if (e.key === "Enter") startGame(); });
+
+ensureChunksAroundPlayer();
+
+let lastTime = performance.now();
+let netSyncAccum = 0;
+let cropVisualAccum = 0;
+
+function animate(now) {
+  requestAnimationFrame(animate);
+  const dt = Math.min(0.05, (now - lastTime) / 1000);
+  lastTime = now;
+  const elapsedSec = now / 1000;
+
+  let isMoving = false;
+  if (state.started) {
+    if (keys["KeyQ"]) state.camYaw += 1.8 * dt;
+
+    let fwd = 0;
+    let right = 0;
+    if (keys["KeyW"] || keys["ArrowUp"]) fwd += 1;
+    if (keys["KeyS"] || keys["ArrowDown"]) fwd -= 1;
+    if (keys["KeyD"] || keys["ArrowRight"]) right += 1;
+    if (keys["KeyA"] || keys["ArrowLeft"]) right -= 1;
+
+    const sprinting = (keys["ShiftLeft"] || keys["ShiftRight"]) && state.energy > 5;
+    const baseSpeed = state.hunger > 10 ? (sprinting ? 13.5 : 8.6) : 5.5;
+
+    if (fwd !== 0 || right !== 0) {
+      isMoving = true;
+      const len = Math.hypot(fwd, right);
+      fwd /= len;
+      right /= len;
+      const sinY = Math.sin(state.camYaw);
+      const cosY = Math.cos(state.camYaw);
+      const vx = (-sinY * fwd + cosY * right) * baseSpeed;
+      const vz = (-cosY * fwd - sinY * right) * baseSpeed;
+      state.x += vx * dt;
+      state.z += vz * dt;
+      state.ry = Math.atan2(-vx, -vz);
+
+      if (sprinting) state.energy = Math.max(0, state.energy - dt * 4.5);
+      state.hunger = Math.max(0, state.hunger - dt * 0.28);
+    } else {
+      state.energy = Math.min(100, state.energy + dt * 3.8);
+      state.hunger = Math.max(0, state.hunger - dt * 0.08);
+    }
+
+    if (keys["Space"] && state.isGrounded) {
+      state.vy = 7.4;
+      state.isGrounded = false;
+    }
+    state.vy -= 19.5 * dt;
+    state.y += state.vy * dt;
+
+    const groundY = getTerrainHeight(state.x, state.z);
+    if (state.y <= groundY) {
+      state.y = groundY;
+      state.vy = 0;
+      state.isGrounded = true;
+    }
+
+    if (state.workTimer > 0) state.workTimer = Math.max(0, state.workTimer - dt);
+    ensureChunksAroundPlayer();
+  } else {
+    state.camYaw = elapsedSec * 0.18;
+    state.y = getTerrainHeight(state.x, state.z);
+  }
+
+  selfMesh.position.set(state.x, state.y, state.z);
+  selfMesh.rotation.y = state.ry;
+  animatePlayerMesh(selfMesh, dt, elapsedSec, isMoving, state.workTimer > 0);
+
+  for (const [, rp] of state.remotePlayers.entries()) {
+    const dx = rp.tx - rp.x;
+    const dz = rp.tz - rp.z;
+    const dist = Math.hypot(dx, dz);
+    rp.x += dx * Math.min(1, dt * 10);
+    rp.z += dz * Math.min(1, dt * 10);
+    rp.y = getTerrainHeight(rp.x, rp.z);
+    rp.mesh.position.set(rp.x, rp.y, rp.z);
+    rp.mesh.rotation.y = rp.ry;
+    animatePlayerMesh(rp.mesh, dt, elapsedSec, dist > 0.05, rp.anim === "work");
+  }
+
+  for (const ch of loadedChunks.values()) {
+    for (const [resId, rm] of ch.resMeshes.entries()) {
+      if (rm.userData.berriesGroup && !rm.userData.berriesGroup.visible) {
+        if (Date.now() - (state.berryPickedAt[resId] || 0) > 45_000) {
+          rm.userData.berriesGroup.visible = true;
+        }
+      }
+    }
+  }
+
+  if (state.buildMode && buildGhostGroup.visible) {
+    const gPos = getBuildPreviewCoords();
+    buildGhostGroup.position.set(gPos.x, gPos.y, gPos.z);
+    buildGhostGroup.rotation.y = state.buildRot;
+  }
+
+  cropVisualAccum += dt;
+  if (cropVisualAccum > 0.45) {
+    cropVisualAccum = 0;
+    for (const s of Object.values(state.structures)) {
+      if (s.type === "bed" || s.type === "greenhouse") {
+        const sm = structureMeshes.get(s.id);
+        if (sm) updateCropVisuals(sm, s, getCropProgress(s), s.crop ? CROPS[s.crop] : null);
+      }
+    }
+    if (state.started) {
+      const pcx = Math.floor((state.x + CHUNK_SIZE * 0.5) / CHUNK_SIZE);
+      const pcz = Math.floor((state.z + CHUNK_SIZE * 0.5) / CHUNK_SIZE);
+      const curChunk = loadedChunks.get(`${pcx},${pcz}`);
+      const curPlot = findPlotAt(state.x, state.z);
+      const locEl = document.getElementById("hud-location");
+      if (curPlot) {
+        const own = state.plots[curPlot.plotId];
+        locEl.textContent = own
+          ? `📍 ${curPlot.sntName} • Уч. №${curPlot.plotNum} (${own.ownerName})`
+          : `📍 ${curPlot.sntName} • Уч. №${curPlot.plotNum} (Свободен)`;
+      } else if (curChunk) {
+        locEl.textContent = `📍 ${curChunk.layout.sntName} (Лес и дороги)`;
+      }
+
+      const promptEl = document.getElementById("interact-prompt");
+      const nearest = findNearestInteractable();
+      if (nearest && !state.buildMode) {
+        promptEl.style.display = "block";
+        document.getElementById("interact-main").textContent = nearest.title;
+        document.getElementById("interact-sub").textContent = nearest.sub;
+      } else {
+        promptEl.style.display = "none";
+      }
+
+      renderMinimap();
+      updateHudUI();
+    }
+  }
+
+  netSyncAccum += dt;
+  if (state.started && netSyncAccum > 0.25) {
+    netSyncAccum = 0;
+    const myPlotsCount = Object.values(state.plots).filter((p) => p.ownerKey === state.playerKey).length;
+    broadcastNetworkPacket({
+      type: "player_moved",
+      name: state.name,
+      color: state.color,
+      x: Number(state.x.toFixed(2)),
+      y: Number(state.y.toFixed(2)),
+      z: Number(state.z.toFixed(2)),
+      ry: Number(state.ry.toFixed(2)),
+      anim: state.workTimer > 0 ? "work" : isMoving ? "walk" : "idle",
+      money: Math.round(state.money),
+      plotsCount: myPlotsCount
+    });
+  }
+
+  const camX = state.x + Math.sin(state.camYaw) * Math.cos(state.camPitch) * state.camDist;
+  const camZ = state.z + Math.cos(state.camYaw) * Math.cos(state.camPitch) * state.camDist;
+  const minCamY = getTerrainHeight(camX, camZ) + 1.2;
+  const camY = Math.max(minCamY, state.y + 1.8 + Math.sin(state.camPitch) * state.camDist);
+
+  camera.position.set(camX, camY, camZ);
+  camera.lookAt(state.x, state.y + 1.6, state.z);
+
+  sunLight.position.set(state.x + 45, state.y + 75, state.z + 35);
+  sunLight.target.position.set(state.x, state.y, state.z);
+
+  renderer.render(scene, camera);
+}
+
+requestAnimationFrame(animate);

@@ -1,0 +1,6 @@
+{
+  "$schema": "https://www.partykit.io/schema.json",
+  "name": "project-dacha-3",
+  "main": "party/server.ts",
+  "compatibilityDate": "2024-05-01"
+}

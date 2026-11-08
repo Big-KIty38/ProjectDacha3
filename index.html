@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>ProjectDacha3 — Мультиплеерная 3D Игра про Русские Садоводства</title>
+  <link rel="stylesheet" href="style.css" />
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        "nostr-tools/pure": "https://esm.sh/nostr-tools@2.10.2/pure"
+      }
+    }
+  </script>
+</head>
+<body>
+  <canvas id="game-canvas"></canvas>
+
+  <!-- ВХОД И ВЫБОР НИКА -->
+  <div id="login-overlay">
+    <div class="login-card">
+      <span class="login-badge">Мультиплеер • 3D • Бесконечный мир СНТ</span>
+      <h1>🌲 Проект Дача 3D</h1>
+      <p class="login-sub">
+        Бесконечный русский лес с дорогами и садоводствами (СНТ). Покупай участки, руби деревья, собирай ягоды с кустов, перерабатывай ресурсы, строй дома и выращивай урожай!
+      </p>
+
+      <div class="form-group">
+        <label for="nickname-input">Твой ник в игре (видят все игроки и на табличках твоих дач):</label>
+        <input id="nickname-input" type="text" maxlength="20" placeholder="Например: Артём" value="Артём" />
+      </div>
+
+      <div class="form-group">
+        <label>Цвет куртки дачника:</label>
+        <div class="color-picker-row" id="color-picker">
+          <div class="color-swatch active" data-color="#2e7d32" style="background:#2e7d32" title="Лесной зелёный"></div>
+          <div class="color-swatch" data-color="#1565c0" style="background:#1565c0" title="Синяя спецовка"></div>
+          <div class="color-swatch" data-color="#c62828" style="background:#c62828" title="Красная олимпийка"></div>
+          <div class="color-swatch" data-color="#ef6c00" style="background:#ef6c00" title="Оранжевый строитель"></div>
+          <div class="color-swatch" data-color="#6a1b9a" style="background:#6a1b9a" title="Фиолетовый"></div>
+          <div class="color-swatch" data-color="#f9a825" style="background:#f9a825" title="Солнечный"></div>
+        </div>
+      </div>
+
+      <div class="starter-features">
+        <div>💰 <b>Стартовый капитал:</b> 500 ₽ (хватит на покупку 1-го участка за 300 ₽ и семена/еду на первое время).</div>
+        <div>🍓 <b>Выживание:</b> Собирай лесные ягоды с кустов и ешь урожай, чтобы поддерживать сытость.</div>
+        <div>🏡 <b>Развитие:</b> Перерабатывай брёвна и камень в доски, брус и кирпич, строй дачи, веди огород, торгуй в Магазине и на Базаре и скупай соседние участки!</div>
+      </div>
+
+      <button class="btn-start" id="start-game-btn">Отправиться в садоводство ▶</button>
+    </div>
+  </div>
+
+  <!-- ИГРОВОЙ ИНТЕРФЕЙС (HUD) -->
+  <div id="hud">
+    <div class="hud-top-left">
+      <div class="player-card">
+        <div class="player-header">
+          <div class="player-name-badge">
+            <span id="hud-color-dot" style="width:11px;height:11px;border-radius:50%;background:#2e7d32;display:inline-block;"></span>
+            <span id="hud-player-name">Артём</span>
+          </div>
+          <span class="net-pill" id="net-status">Онлайн • СНТ</span>
+        </div>
+
+        <div class="stats-row">
+          <span class="money-val" id="hud-money">500 ₽</span>
+          <span>•</span>
+          <span class="plots-val" id="hud-plots">Участков: 0</span>
+        </div>
+
+        <div class="location-val" id="hud-location">📍 СНТ «Лесная Поляна» (Въезд)</div>
+
+        <div class="bars-wrap">
+          <div class="bar-line">
+            <span class="bar-label">🍓 Сытость</span>
+            <div class="bar-track"><div class="bar-fill hunger" id="bar-hunger" style="width:100%"></div></div>
+            <span id="val-hunger" style="width:32px;text-align:right;font-size:11px;">100%</span>
+          </div>
+          <div class="bar-line">
+            <span class="bar-label">⚡ Бодрость</span>
+            <div class="bar-track"><div class="bar-fill energy" id="bar-energy" style="width:100%"></div></div>
+            <span id="val-energy" style="width:32px;text-align:right;font-size:11px;">100%</span>
+          </div>
+        </div>
+
+        <div class="tools-badges" id="hud-tools">
+          <span class="tool-chip">✋ Ручной сбор</span>
+        </div>
+      </div>
+
+      <div class="online-box">
+        <div class="online-title">
+          <span>👥 Дачники на карте</span>
+          <span id="online-count">1</span>
+        </div>
+        <div id="online-list"></div>
+      </div>
+    </div>
+
+    <div class="hud-top-right">
+      <div class="minimap-wrap">
+        <canvas id="minimap-canvas" width="180" height="180"></canvas>
+        <div class="minimap-caption" id="minimap-coords">X: 0 • Z: 0 • Высота: 0.0м</div>
+      </div>
+
+      <div class="action-buttons">
+        <button class="hud-btn" id="btn-eat"><kbd>F</kbd> 🍓 Поесть</button>
+        <button class="hud-btn" id="btn-craft"><kbd>C</kbd> 🪚 Переработка / Крафт</button>
+        <button class="hud-btn" id="btn-build"><kbd>B</kbd> 🏡 Стройка и Огород</button>
+        <button class="hud-btn" id="btn-shop"><kbd>M</kbd> 🏪 Магазин</button>
+        <button class="hud-btn" id="btn-bazaar"><kbd>N</kbd> ⚖️ Базар (Продажа)</button>
+      </div>
+    </div>
+
+    <div id="build-banner">
+      🔨 <b>Режим строительства:</b> <span id="build-selected-name">Грядка</span> •
+      <b>[ЛКМ / E]</b> Построить • <b>[R]</b> Повернуть • <b>[X]</b> Снести объект рядом • <b>[ПКМ / Esc]</b> Отмена
+    </div>
+
+    <div id="interact-prompt">
+      <span id="interact-main">Нажмите [E] для действия</span>
+      <span class="sub-hint" id="interact-sub">Подойдите ближе и нажмите клавишу E или кликните сюда</span>
+    </div>
+
+    <!-- ЧАТ -->
+    <div class="chat-panel">
+      <div id="chat-messages"></div>
+      <div class="chat-input-row">
+        <input id="chat-input" type="text" maxlength="160" placeholder="Написать в чат СНТ (Enter)..." />
+        <button id="chat-send">➤</button>
+      </div>
+    </div>
+
+    <!-- ИНВЕНТАРЬ -->
+    <div class="hud-bottom">
+      <div id="inventory-bar"></div>
+      <div class="controls-hint">
+        <b>WASD / Стрелки</b> — Ходьба • <b>Shift</b> — Бег • <b>Пробел</b> — Прыжок • <b>Мышь (зажать) / Q</b> — Камера • <b>E / ЛКМ</b> — Добывать / Купить / Огород
+      </div>
+    </div>
+  </div>
+
+  <!-- МОДАЛЬНОЕ ОКНО -->
+  <div class="modal-backdrop" id="modal-backdrop">
+    <div class="modal-window">
+      <div class="modal-header">
+        <h2 id="modal-title">Меню</h2>
+        <button class="modal-close" id="modal-close">✕</button>
+      </div>
+      <div id="modal-subtitle" style="font-size:13px;color:#c5e1a5;"></div>
+      <div class="modal-body" id="modal-body"></div>
+    </div>
+  </div>
+
+  <div id="toast-container"></div>
+
+  <script type="module" src="js/game.js"></script>
+</body>
+</html>

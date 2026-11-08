@@ -1,0 +1,12 @@
+{
+  "name": "project-dacha-3",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "partykit dev",
+    "deploy": "partykit deploy"
+  },
+  "devDependencies": {
+    "partykit": "^0.0.115"
+  }
+}
