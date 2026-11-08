@@ -265,7 +265,7 @@ function loadChunk(cx, cz) {
   }
 
   scene.add(group);
-  loadedChunks.set(key, { cx, cz, group, layout, plotMeshes, resMeshes });
+  loadedChunks.set(key, { cx, cz, centerX: layout.centerX, centerZ: layout.centerZ, group, layout, plotMeshes, resMeshes });
 }
 
 function refreshAllPlotSigns() {
@@ -1326,9 +1326,20 @@ function renderMinimap() {
   const toScreen = (wx, wz) => [w / 2 + (wx - state.x) * scale, h / 2 + (wz - state.z) * scale];
 
   for (const ch of loadedChunks.values()) {
-    const [rx1, rz1] = toScreen(ch.centerX - 46, ch.centerZ);
-    const [rx2, rz2] = toScreen(ch.centerX + 46, ch.centerZ);
-    mmCtx.strokeStyle = "#8d6e4c";
+    // Лесное асфальтовое шоссе снаружи СНТ
+    const [hx1, hz1] = toScreen(ch.centerX - 150, ch.centerZ + 108);
+    const [hx2, hz2] = toScreen(ch.centerX + 150, ch.centerZ + 108);
+    mmCtx.strokeStyle = "#545d66";
+    mmCtx.lineWidth = 5;
+    mmCtx.beginPath();
+    mmCtx.moveTo(hx1, hz1);
+    mmCtx.lineTo(hx2, hz2);
+    mmCtx.stroke();
+
+    // Центральная грунтовая улица СНТ и подъездная дорога
+    const [rx1, rz1] = toScreen(ch.centerX - 82, ch.centerZ);
+    const [rx2, rz2] = toScreen(ch.centerX + 82, ch.centerZ);
+    mmCtx.strokeStyle = "#9c7b56";
     mmCtx.lineWidth = 5;
     mmCtx.beginPath();
     mmCtx.moveTo(rx1, rz1);
@@ -1336,7 +1347,7 @@ function renderMinimap() {
     mmCtx.stroke();
 
     const [ex1, ez1] = toScreen(ch.centerX, ch.centerZ);
-    const [ex2, ez2] = toScreen(ch.centerX, ch.centerZ + 44);
+    const [ex2, ez2] = toScreen(ch.centerX, ch.centerZ + 108);
     mmCtx.beginPath();
     mmCtx.moveTo(ex1, ez1);
     mmCtx.lineTo(ex2, ez2);
