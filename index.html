@@ -28,7 +28,7 @@
 
       <div class="form-group">
         <label for="nickname-input">Твой ник в игре (видят все игроки и на табличках твоих дач):</label>
-        <input id="nickname-input" type="text" maxlength="20" placeholder="Например: Артём" value="Артём" />
+        <input id="nickname-input" type="text" maxlength="20" placeholder="Введите ваш ник..." value="" autocomplete="off" />
       </div>
 
       <div class="form-group">
@@ -50,6 +50,7 @@
       </div>
 
       <button class="btn-start" id="start-game-btn">Отправиться в садоводство ▶</button>
+      <button id="reset-profile-btn" style="margin-top:8px;width:100%;padding:7px;background:transparent;border:1px solid rgba(255,255,255,0.2);color:#c5e1a5;border-radius:8px;cursor:pointer;font-size:12px;">🔄 Сбросить локальный прогресс и начать с нуля</button>
     </div>
   </div>
 
@@ -62,7 +63,7 @@
         <div class="player-header">
           <div class="player-name-badge">
             <span id="hud-color-dot" style="width:11px;height:11px;border-radius:50%;background:#2e7d32;display:inline-block;"></span>
-            <span id="hud-player-name">Артём</span>
+            <span id="hud-player-name">Дачник</span>
           </div>
           <span class="net-pill" id="net-status">Онлайн • СНТ</span>
         </div>

@@ -28,24 +28,24 @@ const savedProfile = JSON.parse(localStorage.getItem("project_dacha3_profile_v1"
 const state = {
   started: false,
   playerKey: savedProfile?.playerKey || "p_" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36),
-  name: savedProfile?.name || "Артём",
+  name: savedProfile?.name || "",
   color: savedProfile?.color || "#2e7d32",
   money: savedProfile?.money ?? 500,
   hunger: savedProfile?.hunger ?? 100,
   energy: savedProfile?.energy ?? 100,
   tools: savedProfile?.tools || { axe: false, watering_can: false },
   inv: savedProfile?.inv || {
-    wood: 2,
-    branch: 3,
-    stone: 1,
-    berry: 4,
-    plank: 4,
+    wood: 0,
+    branch: 0,
+    stone: 0,
+    berry: 0,
+    plank: 0,
     timber: 0,
     brick: 0,
     glass: 0,
-    fertilizer: 1,
-    seed_potato: 2,
-    seed_cucumber: 1,
+    fertilizer: 0,
+    seed_potato: 0,
+    seed_cucumber: 0,
     seed_tomato: 0,
     seed_strawberry: 0,
     potato: 0,
@@ -54,7 +54,7 @@ const state = {
     strawberry: 0,
     jam: 0,
     pickles: 0,
-    pie: 1
+    pie: 0
   },
   x: 0,
   y: 0,
@@ -325,7 +325,7 @@ function broadcastNetworkPacket(payload, isWorldState = false) {
   const tag = isWorldState ? "project-dacha-3-world-state-v2" : "project-dacha-3-live-pos-v2";
   try {
     // Для частых пакетов движения используем одноразовый ключ, чтобы релеи никогда не применяли rate-limit по pubkey!
-    const skToUse = isWorldState ? worldSk : generateSecretKey();
+    const skToUse = worldSk;
     const ev = finalizeEvent(
       {
         kind: 1,
@@ -1557,8 +1557,23 @@ document.querySelectorAll(".color-swatch").forEach((sw) => {
   });
 });
 
+const resetBtn = document.getElementById("reset-profile-btn");
+if (resetBtn) {
+  resetBtn.addEventListener("click", () => {
+    localStorage.removeItem("project_dacha3_profile_v1");
+    window.location.reload();
+  });
+}
+
 function startGame() {
-  state.name = nickInput.value.trim().slice(0, 20) || "Артём";
+  const enteredName = nickInput.value.trim().slice(0, 20);
+  if (!enteredName) {
+    nickInput.focus();
+    nickInput.style.borderColor = "#ff5252";
+    showToast("✏️ Пожалуйста, введите ваш ник перед входом!");
+    return;
+  }
+  state.name = enteredName;
   state.started = true;
   saveLocalProfile();
 
@@ -1750,7 +1765,7 @@ function animate(now) {
   }
 
   netSyncAccum += dt;
-  if (state.started && netSyncAccum > 0.65) {
+  if (state.started && isMoving && netSyncAccum > 1.0) {
     netSyncAccum = 0;
     const myPlotsCount = Object.values(state.plots).filter((p) => p.ownerKey === state.playerKey).length;
     broadcastNetworkPacket({
@@ -1761,7 +1776,7 @@ function animate(now) {
       y: Number(state.y.toFixed(2)),
       z: Number(state.z.toFixed(2)),
       ry: Number(state.ry.toFixed(2)),
-      anim: state.workTimer > 0 ? "work" : isMoving ? "walk" : "idle",
+      anim: state.workTimer > 0 ? "work" : "walk",
       money: Math.round(state.money),
       plotsCount: myPlotsCount
     });
