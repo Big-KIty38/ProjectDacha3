@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>ProjectDacha3 — Мультиплеерная 3D Игра про Русские Садоводства</title>
-  <link rel="stylesheet" href="style.css?v=7" />
+  <link rel="stylesheet" href="style.css?v=8" />
   <script type="importmap">
     {
       "imports": {
@@ -139,10 +139,12 @@
       </div>
     </div>
 
-    <!-- ПОДСКАЗКА УПРАВЛЕНИЯ ВНИЗУ -->
+    <!-- РАБОЧИЙ ИНВЕНТАРЬ (ХОТБАР С ИНСТРУМЕНТАМИ И ЕДОЙ В РУКЕ) И ПОДСКАЗКА -->
     <div class="hud-bottom">
+      <div id="held-item-banner">В руке: 🪓 Топор</div>
+      <div id="inventory-bar"></div>
       <div class="controls-hint">
-        <b>WASD</b> — Ходьба • <b>Shift</b> — Бег • <b>Пробел</b> — Прыжок • <b>I / Tab</b> — Инвентарь • <b>C</b> — Крафт • <b>B</b> — Стройка • <b>E / ЛКМ</b> — Действие (Магазин и Базар — пешком у входа в СНТ)
+        <b>1–9 / Колесо</b> — Сменить предмет в руке • <b>F</b> — Съесть еду из руки • <b>WASD</b> — Ходьба • <b>I</b> — Рюкзак • <b>C</b> — Крафт • <b>B</b> — Стройка (только на участке)
       </div>
     </div>
   </div>
@@ -161,6 +163,6 @@
 
   <div id="toast-container"></div>
 
-  <script type="module" src="js/game.js?v=7"></script>
+  <script type="module" src="js/game.js?v=8"></script>
 </body>
 </html>

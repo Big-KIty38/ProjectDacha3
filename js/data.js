@@ -4,6 +4,7 @@ export const ITEMS = {
   wood: { name: "Брёвна", icon: "🪵", food: 0 },
   branch: { name: "Ветки", icon: "🌿", food: 0 },
   stone: { name: "Камень", icon: "🪨", food: 0 },
+  nails: { name: "Гвозди", icon: "🔩", food: 0 },
   berry: { name: "Лесные ягоды", icon: "🍓", food: 18 },
   plank: { name: "Доски", icon: "🪚", food: 0 },
   timber: { name: "Брус", icon: "🧱", food: 0 },
@@ -69,6 +70,13 @@ export const CRAFT_RECIPES = [
     desc: "Распил брёвен на строительные доски для грядок, забора и домов.",
     cost: { wood: 1 },
     out: { plank: 4 }
+  },
+  {
+    id: "craft_nails",
+    title: "🔩 Строительные гвозди (x10)",
+    desc: "Крепёжные гвозди (можно держать в руке и использовать на стройке).",
+    cost: { stone: 1, branch: 1 },
+    out: { nails: 10 }
   },
   {
     id: "craft_timber",
@@ -202,7 +210,8 @@ export const SHOP_GOODS = [
   { id: "buy_seed_cucumber", title: "🥒 Семена огурцов (x2)", desc: "Хрустящие дачные огурчики для продажи и солений.", price: 28, out: { seed_cucumber: 2 } },
   { id: "buy_seed_tomato", title: "🍅 Семена помидоров (x2)", desc: "Спелые томаты для салатов, солений и базара.", price: 36, out: { seed_tomato: 2 } },
   { id: "buy_seed_straw", title: "🍓 Саженцы клубники (x2)", desc: "Дорогая садовая ягода с высокой ценой на базаре.", price: 50, out: { seed_strawberry: 2 } },
-  { id: "buy_pie", title: "🥟 Горячий дачный пирожок", desc: "Сразу восстанавливает +50% сытости при перекусе.", price: 25, out: { pie: 1 } },
+  { id: "buy_pie", title: "🥟 Горячий дачный пирожок", desc: "Возьмите в руку и нажмите [F] — восстанавливает +50% сытости.", price: 25, out: { pie: 1 } },
+  { id: "buy_nails", title: "🔩 Коробка гвоздей (x15)", desc: "Крепёжные гвозди для строительства дачных построек и домов.", price: 18, out: { nails: 15 } },
   { id: "buy_fert", title: "🧪 Удобрение «Био-Дача» (x2)", desc: "Ускоряет созревание любой грядки.", price: 35, out: { fertilizer: 2 } },
   { id: "buy_plank", title: "🪚 Пачка досок (x6)", desc: "Готовые пиломатериалы для быстрой стройки.", price: 45, out: { plank: 6 } },
   { id: "buy_timber", title: "🧱 Комплект бруса (x4)", desc: "Профилированный брус для строительства домов.", price: 70, out: { timber: 4 } },

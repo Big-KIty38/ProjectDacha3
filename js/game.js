@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { Peer } from "peerjs";
 import mqtt from "mqtt";
 import { generateSecretKey, finalizeEvent } from "nostr-tools/pure";
-import { CHUNK_SIZE, getTerrainHeight, getChunkLayout } from "./world.js?v=7";
+import { CHUNK_SIZE, getTerrainHeight, getChunkLayout } from "./world.js?v=8";
 import {
   ITEMS,
   CROPS,
@@ -11,7 +11,7 @@ import {
   SHOP_GOODS,
   BAZAAR_PRICES,
   playSfx
-} from "./data.js?v=7";
+} from "./data.js?v=8";
 import {
   createTerrainChunkMesh,
   createResourceMesh,
@@ -22,8 +22,10 @@ import {
   updateCropVisuals,
   createPlayerMesh,
   createFirstPersonViewmodel,
+  updateFirstPersonHeldItem,
+  updateThirdPersonHeldItem,
   animatePlayerMesh
-} from "./models.js?v=7";
+} from "./models.js?v=8";
 
 const savedProfile = JSON.parse(localStorage.getItem("project_dacha3_profile_v1") || "null");
 
@@ -35,12 +37,14 @@ const state = {
   money: savedProfile?.money ?? 500,
   hunger: savedProfile?.hunger ?? 100,
   energy: savedProfile?.energy ?? 100,
-  tools: savedProfile?.tools || { axe: false, watering_can: false },
+  tools: savedProfile?.tools || { axe: false, hammer: true, watering_can: false },
+  heldItem: savedProfile?.heldItem || "axe",
   inv: savedProfile?.inv || {
     wood: 0,
     branch: 0,
     stone: 0,
-    berry: 0,
+    nails: 15,
+    berry: 3,
     plank: 0,
     timber: 0,
     brick: 0,
@@ -56,7 +60,7 @@ const state = {
     strawberry: 0,
     jam: 0,
     pickles: 0,
-    pie: 0
+    pie: 1
   },
   x: 0,
   y: 0,
@@ -79,6 +83,15 @@ const state = {
   remotePlayers: new Map()
 };
 
+if (state.inv.nails === undefined) {
+  state.inv.nails = 15;
+  if ((state.inv.pie || 0) === 0 && (state.inv.berry || 0) === 0) {
+    state.inv.pie = 1;
+    state.inv.berry = 3;
+  }
+}
+state.tools.hammer = true;
+
 function saveLocalProfile() {
   try {
     localStorage.setItem(
@@ -91,6 +104,7 @@ function saveLocalProfile() {
         hunger: state.hunger,
         energy: state.energy,
         tools: state.tools,
+        heldItem: state.heldItem,
         inv: state.inv,
         plots: state.plots,
         structures: state.structures,
@@ -918,7 +932,9 @@ function findNearestInteractable() {
           best = {
             kind: "resource",
             title: res.kind === "birch" ? "🌳 Русская берёза" : "🌲 Лесная сосна",
-            sub: `Нажмите [E] или ЛКМ — Срубить дерево (+${state.tools.axe ? 4 : 2} Бревна 🪵, +2 Ветки 🌿)`,
+            sub: state.heldItem === "axe"
+              ? `Нажмите [E] или ЛКМ — Срубить топором (+${state.tools.axe ? 4 : 2} Бревна 🪵, +2 Ветки 🌿)`
+              : "🪓 Возьмите Топор в руку [клавиша 2], чтобы срубить дерево!",
             data: { res, mesh: rm }
           };
         } else if (res.kind === "rock") {
@@ -1026,6 +1042,11 @@ function executeInteraction(target) {
       }
     }
 
+    if ((res.kind === "birch" || res.kind === "pine") && state.heldItem !== "axe") {
+      showToast("🪓 Чтобы срубить дерево, возьмите Топор в руку [клавиша 2]!");
+      return;
+    }
+
     playSfx("chop");
     if (res.kind === "birch" || res.kind === "pine") {
       const woodGain = state.tools.axe ? 4 : 2;
@@ -1080,22 +1101,120 @@ function executeInteraction(target) {
   }
 }
 
-function eatFoodAction() {
-  const foodOrder = ["pie", "pickles", "jam", "strawberry", "tomato", "cucumber", "potato", "berry"];
-  for (const key of foodOrder) {
-    if ((state.inv[key] || 0) > 0) {
-      state.inv[key]--;
-      const gain = ITEMS[key].food || 20;
-      state.hunger = Math.min(100, state.hunger + gain);
-      state.energy = Math.min(100, state.energy + Math.round(gain * 0.6));
-      playSfx("pick");
-      showToast(`😋 Вы съели «${ITEMS[key].name}» (+${gain}% сытости)!`);
-      updateHudUI();
-      saveLocalProfile();
-      return;
+const FOOD_KEYS = ["pie", "berry", "potato", "cucumber", "tomato", "strawberry", "jam", "pickles"];
+
+export function getHeldItemTitle(id = state.heldItem) {
+  if (id === "hand") return "✋ Пустая рука";
+  if (id === "axe") return state.tools.axe ? "🪓 Стальной топор (x2 дерево)" : "🪓 Топор дачника";
+  if (id === "hammer") return "🔨 Строительный молоток";
+  if (id === "nails") return `🔩 Гвозди (${state.inv.nails || 0} шт.)`;
+  if (id === "watering_can") return "🚿 Садовая лейка";
+  if (ITEMS[id]) {
+    const info = ITEMS[id];
+    const cnt = state.inv[id] || 0;
+    return `${info.icon} ${info.name} (${cnt} шт.${info.food > 0 ? ` • +${info.food}% сытости [F]` : ""})`;
+  }
+  return "✋ Пустая рука";
+}
+
+function getHotbarSlots() {
+  const slots = [
+    { id: "hand", icon: "✋", name: "Рука", count: null, kind: "tool" },
+    { id: "axe", icon: "🪓", name: state.tools.axe ? "Сталь. топор" : "Топор", count: null, kind: "tool" },
+    { id: "hammer", icon: "🔨", name: "Молоток", count: null, kind: "tool" },
+    { id: "nails", icon: "🔩", name: "Гвозди", count: state.inv.nails || 0, kind: "item" }
+  ];
+  if (state.tools.watering_can) {
+    slots.push({ id: "watering_can", icon: "🚿", name: "Лейка", count: null, kind: "tool" });
+  }
+  let anyFoodAdded = false;
+  for (const fk of FOOD_KEYS) {
+    const cnt = state.inv[fk] || 0;
+    if (cnt > 0) {
+      anyFoodAdded = true;
+      slots.push({
+        id: fk,
+        icon: ITEMS[fk].icon,
+        name: ITEMS[fk].name,
+        count: cnt,
+        kind: "food"
+      });
     }
   }
-  showToast("🍓 Нет еды в рюкзаке! Соберите лесные ягоды с кустов [E] или купите пирожок в Магазине!");
+  if (!anyFoodAdded) {
+    slots.push({ id: "berry", icon: "🍓", name: "Еда (нет)", count: 0, kind: "empty_food" });
+  }
+  if (
+    state.heldItem &&
+    !slots.some((s) => s.id === state.heldItem) &&
+    ITEMS[state.heldItem] &&
+    (state.inv[state.heldItem] || 0) > 0
+  ) {
+    slots.push({
+      id: state.heldItem,
+      icon: ITEMS[state.heldItem].icon,
+      name: ITEMS[state.heldItem].name,
+      count: state.inv[state.heldItem] || 0,
+      kind: "item"
+    });
+  }
+  return slots.slice(0, 9);
+}
+
+function selectHeldItem(id, silent = false) {
+  if (id === "berry" && (state.inv.berry || 0) <= 0) {
+    showToast("🍓 У вас пока нет ягод! Соберите их с ягодного куста [E] или купите пирожок в Магазине.");
+    return;
+  }
+  if (ITEMS[id] && id !== "nails" && (state.inv[id] || 0) <= 0) {
+    state.heldItem = "hand";
+  } else {
+    state.heldItem = id;
+  }
+  updateFirstPersonHeldItem(fpHand, state.heldItem, state.tools.axe);
+  updateThirdPersonHeldItem(selfMesh, state.heldItem, state.tools.axe);
+  updateHudUI();
+  saveLocalProfile();
+  if (!silent) {
+    showToast(`🖐️ В руке: ${getHeldItemTitle(state.heldItem)}`);
+  }
+}
+
+function cycleHotbarSlot(dir) {
+  const slots = getHotbarSlots().filter((s) => s.kind !== "empty_food");
+  if (slots.length === 0) return;
+  const idx = slots.findIndex((s) => s.id === state.heldItem);
+  const nextIdx = idx === -1 ? 0 : (idx + dir + slots.length) % slots.length;
+  selectHeldItem(slots[nextIdx].id, true);
+}
+
+function eatFoodAction() {
+  const held = state.heldItem;
+  const info = ITEMS[held];
+  if (!info || !(info.food > 0)) {
+    showToast("⚠️ Еду можно есть только держа её в руке! Возьмите еду в руку (слоты 1–9 внизу экрана).");
+    return;
+  }
+  if ((state.inv[held] || 0) <= 0) {
+    selectHeldItem("hand", true);
+    showToast("⚠️ Эта еда закончилась! Возьмите другую еду в руку.");
+    return;
+  }
+  state.inv[held]--;
+  const gain = info.food || 20;
+  state.hunger = Math.min(100, state.hunger + gain);
+  state.energy = Math.min(100, state.energy + Math.round(gain * 0.6));
+  state.workTimer = 0.38;
+  playSfx("pick");
+  showToast(`😋 Вы съели с руки «${info.name}» (+${gain}% сытости)!`);
+  if ((state.inv[held] || 0) <= 0) {
+    const remainingFood = FOOD_KEYS.find((k) => (state.inv[k] || 0) > 0);
+    state.heldItem = remainingFood || "hand";
+    updateFirstPersonHeldItem(fpHand, state.heldItem, state.tools.axe);
+  updateThirdPersonHeldItem(selfMesh, state.heldItem, state.tools.axe);
+  }
+  updateHudUI();
+  saveLocalProfile();
 }
 
 // ==========================================
@@ -1118,41 +1237,73 @@ function openInventoryModal() {
     closeModal(true);
     return;
   }
-  modalTitle.textContent = `🎒 Инвентарь дачника (Наличные: ${Math.round(state.money)} ₽)`;
-  modalSubtitle.textContent = "Ваши добытые ресурсы, стройматериалы, семена и запасы еды:";
+  modalTitle.textContent = `🎒 Рабочий инвентарь и Рюкзак (Наличные: ${Math.round(state.money)} ₽)`;
+  modalSubtitle.textContent = "Выберите инструмент, гвозди или еду, чтобы взять в руку (еду можно есть только держа её в руке [F]):";
   modalBody.innerHTML = "";
-  let hasAny = false;
-  Object.entries(ITEMS).forEach(([key, info]) => {
-    const cnt = state.inv[key] || 0;
-    if (cnt <= 0) return;
-    hasAny = true;
+
+  const baseTools = [
+    { id: "hand", icon: "✋", name: "Пустая рука", desc: "Для сбора ягод, камней и ухода за огородом." },
+    { id: "axe", icon: "🪓", name: state.tools.axe ? "Стальной топор (x2 дерево)" : "Топор дачника", desc: "Держите в руке [2], чтобы рубить берёзы и сосны." },
+    { id: "hammer", icon: "🔨", name: "Строительный молоток", desc: "Держите в руке [3] для постройки домов, заборов и грядок на участке." }
+  ];
+  if (state.tools.watering_can) {
+    baseTools.push({ id: "watering_can", icon: "🚿", name: "Садовая лейка", desc: "Автоматический полив при посадке семян." });
+  }
+
+  baseTools.forEach((t) => {
+    const isHeld = state.heldItem === t.id;
     const card = document.createElement("div");
     card.className = "card-item";
     card.innerHTML = `
       <div>
-        <div class="card-title">${info.icon} ${info.name}: <span style="color:#ffd54f">${cnt} шт.</span></div>
-        <div class="card-desc">${info.food > 0 ? `Восстанавливает +${info.food}% сытости.` : "Ресурс для строительства, огорода, крафта или продажи на Базаре."}</div>
+        <div class="card-title">${t.icon} ${t.name} ${isHeld ? '<span style="color:#ffd54f">• В РУКЕ</span>' : ""}</div>
+        <div class="card-desc">${t.desc}</div>
       </div>
-      ${info.food > 0 ? `<button class="card-btn">😋 Съесть (+${info.food}% сытости)</button>` : ""}
+      <button class="card-btn" style="${isHeld ? "background:#2e7d32;" : ""}">${isHeld ? "✅ Сейчас в руке" : "🖐️ Взять в руку"}</button>
     `;
-    if (info.food > 0) {
-      card.querySelector("button").addEventListener("click", () => {
-        if ((state.inv[key] || 0) < 1) return;
-        state.inv[key]--;
-        state.hunger = Math.min(100, state.hunger + info.food);
-        state.energy = Math.min(100, state.energy + Math.round(info.food * 0.6));
-        playSfx("pick");
-        showToast(`😋 Съедено: ${info.name} (+${info.food}% сытости)`);
-        updateHudUI();
-        saveLocalProfile();
+    card.querySelector("button").addEventListener("click", () => {
+      selectHeldItem(t.id);
+      openInventoryModal();
+    });
+    modalBody.appendChild(card);
+  });
+
+  Object.entries(ITEMS).forEach(([key, info]) => {
+    const cnt = state.inv[key] || 0;
+    if (cnt <= 0 && key !== "nails") return;
+    const isHeld = state.heldItem === key;
+    const card = document.createElement("div");
+    card.className = "card-item";
+    const descText = info.food > 0
+      ? `Еда (+${info.food}% сытости). Возьмите в руку и нажмите [F], чтобы съесть!`
+      : key === "nails"
+      ? "Строительный крепёж. Можно держать в руке [4] при постройке объектов на участке."
+      : "Ресурс для строительства, огорода, крафта или продажи на Базаре.";
+    card.innerHTML = `
+      <div>
+        <div class="card-title">${info.icon} ${info.name}: <span style="color:#ffd54f">${cnt} шт.</span> ${isHeld ? '<span style="color:#69f0ae">• В РУКЕ</span>' : ""}</div>
+        <div class="card-desc">${descText}</div>
+      </div>
+      <div style="display:flex;gap:6px;">
+        <button class="card-btn btn-equip" style="flex:1;${isHeld ? "background:#2e7d32;" : ""}" ${cnt <= 0 ? "disabled" : ""}>${isHeld ? "✅ В руке" : "🖐️ Взять в руку"}</button>
+        ${info.food > 0 && isHeld && cnt > 0 ? `<button class="card-btn btn-eat-held" style="flex:1;background:#ef6c00;">😋 Съесть с руки</button>` : ""}
+      </div>
+    `;
+    card.querySelector(".btn-equip").addEventListener("click", () => {
+      if (cnt <= 0) return;
+      selectHeldItem(key);
+      openInventoryModal();
+    });
+    const eatBtn = card.querySelector(".btn-eat-held");
+    if (eatBtn) {
+      eatBtn.addEventListener("click", () => {
+        eatFoodAction();
         openInventoryModal();
       });
     }
     modalBody.appendChild(card);
   });
-  if (!hasAny) {
-    modalBody.innerHTML = `<div style="grid-column:1/-1;padding:18px;text-align:center;color:#c5e1a5;">Инвентарь пока пуст — рубите деревья, собирайте ягоды с кустов [E] или сходите пешком в Магазин у входа в СНТ!</div>`;
-  }
+
   if (document.pointerLockElement) document.exitPointerLock();
   modalBackdrop.style.display = "flex";
 }
@@ -1387,9 +1538,72 @@ function openGardenCareModal(struct) {
 const buildBanner = document.getElementById("build-banner");
 const buildSelectedName = document.getElementById("build-selected-name");
 
+const BUILDING_FOOTPRINTS = {
+  bed: { w: 3.4, d: 1.9 },
+  greenhouse: { w: 4.8, d: 3.2 },
+  fence: { w: 4.0, d: 0.4 },
+  well: { w: 1.8, d: 1.8 },
+  workbench: { w: 2.6, d: 1.4 },
+  gazebo: { w: 5.6, d: 5.6 },
+  shed: { w: 4.8, d: 3.5 },
+  house_wood: { w: 7.2, d: 6.4 },
+  banya: { w: 5.4, d: 4.6 },
+  house_terem: { w: 7.8, d: 6.8 },
+  house_brick: { w: 8.8, d: 7.4 }
+};
+
+function checkBuildPlacement(buildingDef, x, z, rot) {
+  const plot = findPlotAt(x, z);
+  if (!plot) {
+    return {
+      ok: false,
+      plot: null,
+      reason: "⚠️ Дома и постройки можно ставить только в пределах границ дачного участка!"
+    };
+  }
+  const owner = state.plots[plot.plotId];
+  if (owner && owner.ownerKey !== state.playerKey) {
+    return {
+      ok: false,
+      plot,
+      reason: `⚠️ Нельзя строить на чужом участке (владелец: ${owner.ownerName})!`
+    };
+  }
+  const fp = BUILDING_FOOTPRINTS[buildingDef.type] || { w: 4, d: 4 };
+  const cos = Math.abs(Math.cos(rot));
+  const sin = Math.abs(Math.sin(rot));
+  const halfW = (fp.w * cos + fp.d * sin) / 2;
+  const halfD = (fp.w * sin + fp.d * cos) / 2;
+  const margin = 0.3;
+  const fitsX = Math.abs(x - plot.x) + halfW <= plot.w / 2 - margin;
+  const fitsZ = Math.abs(z - plot.z) + halfD <= plot.d / 2 - margin;
+  if (!fitsX || !fitsZ) {
+    return {
+      ok: false,
+      plot,
+      reason: `⚠️ Постройка выходит за пределы участка №${plot.plotNum}! Поставьте её полностью внутри границ участка.`
+    };
+  }
+  return { ok: true, plot, reason: "" };
+}
+
+function updateGhostPlacementTint(isValid) {
+  if (buildGhostGroup.userData.lastValid === isValid) return;
+  buildGhostGroup.userData.lastValid = isValid;
+  buildGhostGroup.traverse((child) => {
+    if (child.isMesh && child.material && child.material.emissive) {
+      child.material.emissive.setHex(isValid ? 0x1b5e20 : 0xb71c1c);
+      child.material.emissiveIntensity = isValid ? 0.35 : 0.7;
+    }
+  });
+}
+
 function enterBuildMode(buildingDef) {
   state.buildMode = buildingDef;
-  buildSelectedName.textContent = buildingDef.name;
+  if (state.heldItem !== "hammer" && state.heldItem !== "nails") {
+    selectHeldItem("hammer", true);
+  }
+  buildSelectedName.textContent = `${buildingDef.name} (только в пределах участка • в руке Молоток [3] или Гвозди [4])`;
   buildBanner.style.display = "block";
   while (buildGhostGroup.children.length > 0) buildGhostGroup.remove(buildGhostGroup.children[0]);
   const ghost = createStructureMesh({ id: "ghost", type: buildingDef.type, x: 0, z: 0, rot: 0 });
@@ -1403,9 +1617,12 @@ function enterBuildMode(buildingDef) {
     }
   });
   buildGhostGroup.add(ghost);
+  buildGhostGroup.userData.lastValid = null;
   const gPos = getBuildPreviewCoords();
   buildGhostGroup.position.set(gPos.x, gPos.y, gPos.z);
   buildGhostGroup.rotation.y = state.buildRot;
+  const check = checkBuildPlacement(buildingDef, gPos.x, gPos.z, state.buildRot);
+  updateGhostPlacementTint(check.ok);
   buildGhostGroup.visible = true;
   lockPointerSafe();
 }
@@ -1427,20 +1644,23 @@ function getBuildPreviewCoords() {
 function confirmPlaceBuilding() {
   const b = state.buildMode;
   if (!b) return;
+  if (state.heldItem !== "hammer" && state.heldItem !== "nails") {
+    showToast("🔨 Возьмите в руку Молоток [3] или Гвозди [4], чтобы построить объект!");
+    return;
+  }
   if (!hasResources(b.cost)) {
     showToast("❌ Не хватает стройматериалов!");
     exitBuildMode();
     return;
   }
   const pos = getBuildPreviewCoords();
-  const plot = findPlotAt(pos.x, pos.z);
-  if (plot) {
-    const owner = state.plots[plot.plotId];
-    if (owner && owner.ownerKey !== state.playerKey) {
-      showToast(`⚠️ Нельзя строить на участке игрока ${owner.ownerName}!`);
-      return;
-    }
+  const check = checkBuildPlacement(b, pos.x, pos.z, state.buildRot);
+  if (!check.ok) {
+    showToast(check.reason);
+    return;
   }
+  const plot = check.plot;
+  state.workTimer = 0.38;
   consumeResources(b.cost);
   const struct = {
     id: `st_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
@@ -1506,6 +1726,15 @@ window.addEventListener("keydown", (e) => {
   }
   keys[k] = true;
 
+  if (k.startsWith("Digit")) {
+    const num = parseInt(k.replace("Digit", ""), 10);
+    if (num >= 1 && num <= 9) {
+      const slots = getHotbarSlots();
+      if (slots[num - 1]) selectHeldItem(slots[num - 1].id);
+      return;
+    }
+  }
+
   if (k === "KeyE") {
     if (state.buildMode) confirmPlaceBuilding();
     else executeInteraction(findNearestInteractable());
@@ -1570,12 +1799,24 @@ window.addEventListener("mouseup", (e) => {
   isDraggingCam = false;
   if (modalBackdrop.style.display === "flex") return;
   if (wasLocked && !dragMoved && state.started && e.button === 0 && e.target === canvas) {
-    if (state.buildMode) confirmPlaceBuilding();
-    else executeInteraction(findNearestInteractable());
+    if (state.buildMode) {
+      confirmPlaceBuilding();
+    } else {
+      const nearest = findNearestInteractable();
+      if (nearest) executeInteraction(nearest);
+      else if (ITEMS[state.heldItem]?.food > 0) eatFoodAction();
+      else state.workTimer = 0.32;
+    }
   }
 });
 canvas.addEventListener("contextmenu", (e) => { e.preventDefault(); if (state.buildMode) exitBuildMode(); });
-canvas.addEventListener("wheel", (e) => { state.camDist = Math.max(4.5, Math.min(24, state.camDist + e.deltaY * 0.01)); });
+canvas.addEventListener("wheel", (e) => {
+  if (state.firstPerson) {
+    cycleHotbarSlot(e.deltaY > 0 ? 1 : -1);
+  } else {
+    state.camDist = Math.max(4.5, Math.min(24, state.camDist + e.deltaY * 0.01));
+  }
+});
 window.addEventListener("resize", () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
@@ -1638,13 +1879,49 @@ function updateHudUI() {
   document.getElementById("val-energy").textContent = `${ePct}%`;
 
   const toolsEl = document.getElementById("hud-tools");
-  toolsEl.innerHTML = "";
-  if (state.tools.axe) toolsEl.innerHTML += `<span class="tool-chip">🪓 Стальной топор (x2 дерево)</span>`;
-  if (state.tools.watering_can) toolsEl.innerHTML += `<span class="tool-chip">🚿 Садовая лейка</span>`;
-  if (!state.tools.axe && !state.tools.watering_can) toolsEl.innerHTML = `<span class="tool-chip">✋ Ручной сбор</span>`;
+  toolsEl.innerHTML = `<span class="tool-chip" style="border-color:#ffd54f;color:#fffde7;">🖐️ В руке: ${getHeldItemTitle(state.heldItem)}</span>`;
 
+  const bannerEl = document.getElementById("held-item-banner");
+  if (bannerEl) {
+    bannerEl.textContent = `В руке: ${getHeldItemTitle(state.heldItem)}`;
+  }
 
+  const eatBtnEl = document.getElementById("btn-eat");
+  if (eatBtnEl) {
+    const heldFood = ITEMS[state.heldItem]?.food > 0 ? ITEMS[state.heldItem] : null;
+    eatBtnEl.innerHTML = heldFood
+      ? `<kbd>F</kbd> 😋 Съесть: ${heldFood.icon} ${heldFood.name}`
+      : `<kbd>F</kbd> 🍓 Поесть (из руки)`;
+  }
 
+  const invBar = document.getElementById("inventory-bar");
+  if (invBar) {
+    const slots = getHotbarSlots();
+    const sig = slots.map((s) => `${s.id}:${s.count ?? ""}:${state.heldItem === s.id ? 1 : 0}`).join("|");
+    if (invBar.dataset.sig !== sig) {
+      invBar.dataset.sig = sig;
+      invBar.innerHTML = "";
+      slots.forEach((slot, i) => {
+        const div = document.createElement("div");
+        div.className = "inv-slot" + (state.heldItem === slot.id ? " active" : "");
+        div.innerHTML = `
+          <span class="slot-key">${i + 1}</span>
+          <span>${slot.icon} ${slot.name}</span>
+          ${slot.count !== null ? `<span class="cnt">x${slot.count}</span>` : ""}
+        `;
+        div.addEventListener("mousedown", (e) => e.stopPropagation());
+        div.addEventListener("mouseup", (e) => e.stopPropagation());
+        div.addEventListener("click", (e) => {
+          e.stopPropagation();
+          selectHeldItem(slot.id);
+        });
+        invBar.appendChild(div);
+      });
+    }
+  }
+
+  updateFirstPersonHeldItem(fpHand, state.heldItem, state.tools.axe);
+  updateThirdPersonHeldItem(selfMesh, state.heldItem, state.tools.axe);
   updateOnlineListUI();
 }
 
@@ -1800,6 +2077,8 @@ function startGame() {
 
   camera.remove(fpHand);
   fpHand = createFirstPersonViewmodel(state.color);
+  updateFirstPersonHeldItem(fpHand, state.heldItem, state.tools.axe);
+  updateThirdPersonHeldItem(selfMesh, state.heldItem, state.tools.axe);
   fpHand.visible = state.firstPerson;
   camera.add(fpHand);
 
@@ -1937,6 +2216,8 @@ function animate(now) {
     const gPos = getBuildPreviewCoords();
     buildGhostGroup.position.set(gPos.x, gPos.y, gPos.z);
     buildGhostGroup.rotation.y = state.buildRot;
+    const check = checkBuildPlacement(state.buildMode, gPos.x, gPos.z, state.buildRot);
+    updateGhostPlacementTint(check.ok);
   }
 
   cropVisualAccum += dt;

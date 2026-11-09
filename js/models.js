@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { CHUNK_SIZE, getTerrainHeight, getSurfaceType } from "./world.js?v=7";
+import { CHUNK_SIZE, getTerrainHeight, getSurfaceType } from "./world.js?v=8";
 
 // ==========================================
 // ПРОЦЕДУРНЫЕ БЕСШОВНЫЕ ТЕКСТУРЫ (Трава, Береста, Кора сосны, Доски, Брус, Кирпич, Листва)
@@ -781,13 +781,168 @@ export function updateCropVisuals(structMesh, struct, progress, cropInfo) {
   cropGroup.add(badge);
 }
 
+// Создание 3D-модели предмета в руке (для 1-го и 3-го лица)
+export function buildHeldItemMesh(heldId = "axe", hasSteelAxe = false, forFirstPerson = true) {
+  const group = new THREE.Group();
+  const dt = !forFirstPerson;
+  const ro = forFirstPerson ? 27 : 2;
+
+  const woodMat = new THREE.MeshStandardMaterial({ map: TEX_WOOD_PLANK, roughness: 0.78, depthTest: dt });
+  const steelMat = new THREE.MeshStandardMaterial({
+    color: hasSteelAxe && heldId === "axe" ? 0xe1f5fe : 0xcfd8dc,
+    metalness: 0.65,
+    roughness: 0.28,
+    depthTest: dt
+  });
+  const darkIronMat = new THREE.MeshStandardMaterial({ color: 0x546e7a, metalness: 0.7, roughness: 0.32, depthTest: dt });
+
+  if (!heldId || heldId === "hand") {
+    return group;
+  }
+
+  if (heldId === "axe") {
+    const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.026, 0.46, 8), woodMat);
+    handle.position.set(0, 0.14, -0.02);
+    handle.rotation.x = 0.35;
+    handle.renderOrder = ro;
+
+    const axeBlade = new THREE.Mesh(new THREE.BoxGeometry(0.032, 0.13, 0.17), steelMat);
+    axeBlade.position.set(0, 0.18, -0.045);
+    axeBlade.renderOrder = ro + 1;
+    handle.add(axeBlade);
+
+    const edge = new THREE.Mesh(
+      new THREE.BoxGeometry(0.016, 0.14, 0.04),
+      new THREE.MeshStandardMaterial({ color: 0xffffff, metalness: 0.8, roughness: 0.15, depthTest: dt })
+    );
+    edge.position.set(0, 0.18, -0.13);
+    edge.renderOrder = ro + 1;
+    handle.add(edge);
+
+    group.add(handle);
+  } else if (heldId === "hammer") {
+    const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.021, 0.025, 0.42, 8), woodMat);
+    handle.position.set(0, 0.13, -0.02);
+    handle.rotation.x = 0.32;
+    handle.renderOrder = ro;
+
+    const headBlock = new THREE.Mesh(new THREE.BoxGeometry(0.058, 0.058, 0.19), darkIronMat);
+    headBlock.position.set(0, 0.19, 0.0);
+    headBlock.renderOrder = ro + 1;
+    handle.add(headBlock);
+
+    const striker = new THREE.Mesh(new THREE.CylinderGeometry(0.034, 0.034, 0.04, 8), steelMat);
+    striker.rotation.x = Math.PI / 2;
+    striker.position.set(0, 0.19, -0.105);
+    striker.renderOrder = ro + 1;
+    handle.add(striker);
+
+    group.add(handle);
+  } else if (heldId === "nails") {
+    // Связка строительных гвоздей со шляпками в ладони
+    const nailOffsets = [
+      [-0.03, 0.03, -0.02, -0.15, 0.1],
+      [-0.01, 0.04, -0.03, -0.05, -0.05],
+      [0.01, 0.04, -0.01, 0.08, 0.04],
+      [0.03, 0.03, -0.02, 0.18, -0.08],
+      [0.0, 0.02, 0.01, 0.02, 0.18]
+    ];
+    for (const [nx, ny, nz, rx, rz] of nailOffsets) {
+      const nail = new THREE.Group();
+      const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.006, 0.002, 0.18, 6), steelMat);
+      shaft.position.y = 0.06;
+      shaft.renderOrder = ro;
+      const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.018, 0.009, 8), darkIronMat);
+      cap.position.y = 0.15;
+      cap.renderOrder = ro + 1;
+      nail.add(shaft, cap);
+      nail.position.set(nx, ny, nz);
+      nail.rotation.set(rx + 0.3, 0, rz);
+      group.add(nail);
+    }
+  } else if (heldId === "watering_can") {
+    const canMat = new THREE.MeshStandardMaterial({ color: 0x26a69a, metalness: 0.35, roughness: 0.45, depthTest: dt });
+    const body = new THREE.Mesh(new THREE.CylinderGeometry(0.085, 0.095, 0.17, 10), canMat);
+    body.position.set(0, 0.05, -0.04);
+    body.renderOrder = ro;
+    const spout = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.022, 0.18, 8), canMat);
+    spout.position.set(0, 0.09, -0.15);
+    spout.rotation.x = -0.8;
+    spout.renderOrder = ro;
+    group.add(body, spout);
+  } else if (heldId === "pie") {
+    const pieMat = new THREE.MeshStandardMaterial({ color: 0xd99038, roughness: 0.6, depthTest: dt });
+    const pie = new THREE.Mesh(new THREE.SphereGeometry(0.082, 10, 8), pieMat);
+    pie.scale.set(1.05, 0.65, 1.42);
+    pie.position.set(0, 0.06, -0.02);
+    pie.renderOrder = ro;
+    group.add(pie);
+  } else if (heldId === "berry" || heldId === "strawberry") {
+    const bMat = new THREE.MeshStandardMaterial({
+      color: heldId === "strawberry" ? 0xd81b60 : 0xe53935,
+      roughness: 0.35,
+      depthTest: dt
+    });
+    const leafMat = new THREE.MeshStandardMaterial({ color: 0x43a047, roughness: 0.7, depthTest: dt });
+    const leaf = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.02, 0.11), leafMat);
+    leaf.position.set(0, 0.04, -0.02);
+    leaf.renderOrder = ro;
+    group.add(leaf);
+    const pts = [[-0.028, 0.075, -0.02], [0.028, 0.075, -0.01], [0, 0.085, -0.045], [0.01, 0.07, 0.015]];
+    for (const [bx, by, bz] of pts) {
+      const b = new THREE.Mesh(new THREE.SphereGeometry(0.032, 8, 8), bMat);
+      b.position.set(bx, by, bz);
+      b.renderOrder = ro + 1;
+      group.add(b);
+    }
+  } else if (heldId === "tomato") {
+    const tMat = new THREE.MeshStandardMaterial({ color: 0xe53935, roughness: 0.3, depthTest: dt });
+    const tom = new THREE.Mesh(new THREE.SphereGeometry(0.078, 10, 10), tMat);
+    tom.position.set(0, 0.07, -0.02);
+    tom.renderOrder = ro;
+    group.add(tom);
+  } else if (heldId === "cucumber") {
+    const cMat = new THREE.MeshStandardMaterial({ color: 0x43a047, roughness: 0.5, depthTest: dt });
+    const cuc = new THREE.Mesh(new THREE.CapsuleGeometry(0.038, 0.12, 6, 8), cMat);
+    cuc.rotation.x = Math.PI / 3;
+    cuc.position.set(0, 0.07, -0.03);
+    cuc.renderOrder = ro;
+    group.add(cuc);
+  } else if (heldId === "potato") {
+    const pMat = new THREE.MeshStandardMaterial({ color: 0xbcaaa4, roughness: 0.85, depthTest: dt });
+    const pot = new THREE.Mesh(new THREE.SphereGeometry(0.072, 8, 8), pMat);
+    pot.scale.set(1.0, 0.82, 1.28);
+    pot.position.set(0, 0.065, -0.02);
+    pot.renderOrder = ro;
+    group.add(pot);
+  } else if (heldId === "jam" || heldId === "pickles") {
+    const jarMat = new THREE.MeshStandardMaterial({
+      color: heldId === "jam" ? 0xad1457 : 0x558b2f,
+       roughness: 0.25,
+      depthTest: dt
+    });
+    const jar = new THREE.Mesh(new THREE.CylinderGeometry(0.068, 0.068, 0.16, 10), jarMat);
+    jar.position.set(0, 0.08, -0.02);
+    jar.renderOrder = ro;
+    const lid = new THREE.Mesh(new THREE.CylinderGeometry(0.072, 0.072, 0.022, 10), steelMat);
+    lid.position.set(0, 0.165, -0.02);
+    lid.renderOrder = ro + 1;
+    group.add(jar, lid);
+  } else {
+    const itemBox = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.11, 0.11), woodMat);
+    itemBox.position.set(0, 0.07, -0.02);
+    itemBox.renderOrder = ro;
+    group.add(itemBox);
+  }
+
+  return group;
+}
+
 // Рука и инструмент для вида от первого лица
 export function createFirstPersonViewmodel(jacketColor = "#2e7d32") {
   const g = new THREE.Group();
   const sleeveMat = new THREE.MeshStandardMaterial({ color: jacketColor, roughness: 0.7, depthTest: false });
   const skinMat = new THREE.MeshStandardMaterial({ color: 0xffccaa, roughness: 0.65, depthTest: false });
-  const woodMat = new THREE.MeshStandardMaterial({ map: TEX_WOOD_PLANK, roughness: 0.78, depthTest: false });
-  const steelMat = new THREE.MeshStandardMaterial({ color: 0xcfd8dc, metalness: 0.6, roughness: 0.3, depthTest: false });
 
   const arm = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.14, 0.48), sleeveMat);
   arm.position.set(0.34, -0.28, -0.45);
@@ -800,20 +955,27 @@ export function createFirstPersonViewmodel(jacketColor = "#2e7d32") {
   hand.renderOrder = 26;
   arm.add(hand);
 
-  const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.025, 0.46, 6), woodMat);
-  handle.position.set(0, 0.14, -0.27);
-  handle.rotation.x = 0.35;
-  handle.renderOrder = 26;
-  arm.add(handle);
-
-  const axeBlade = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.12, 0.16), steelMat);
-  axeBlade.position.set(0, 0.18, -0.04);
-  axeBlade.renderOrder = 27;
-  handle.add(axeBlade);
+  const toolHolder = new THREE.Group();
+  toolHolder.position.set(0, 0, -0.25);
+  arm.add(toolHolder);
 
   g.add(arm);
   g.userData.arm = arm;
+  g.userData.toolHolder = toolHolder;
+  g.userData.currentKey = "";
+  updateFirstPersonHeldItem(g, "axe", false);
   return g;
+}
+
+export function updateFirstPersonHeldItem(fpGroup, heldId, hasSteelAxe = false) {
+  if (!fpGroup || !fpGroup.userData.toolHolder) return;
+  const key = `${heldId}_${hasSteelAxe ? 1 : 0}`;
+  if (fpGroup.userData.currentKey === key) return;
+  fpGroup.userData.currentKey = key;
+
+  const holder = fpGroup.userData.toolHolder;
+  while (holder.children.length > 0) holder.remove(holder.children[0]);
+  holder.add(buildHeldItemMesh(heldId, hasSteelAxe, true));
 }
 
 export function createPlayerMesh(name, jacketColor = "#2e7d32") {
@@ -837,10 +999,11 @@ export function createPlayerMesh(name, jacketColor = "#2e7d32") {
   const rightArm = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.72, 0.22), jacketMat);
   rightArm.position.set(0.48, 1.15, 0);
 
-  const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.6, 6), MAT.woodLight);
-  handle.rotation.x = Math.PI / 2;
-  handle.position.set(0, -0.28, 0.24);
-  rightArm.add(handle);
+  const heldHolder = new THREE.Group();
+  heldHolder.position.set(0, -0.32, 0.18);
+  heldHolder.rotation.x = Math.PI / 3;
+  heldHolder.scale.setScalar(1.25);
+  rightArm.add(heldHolder);
 
   const head = new THREE.Mesh(new THREE.SphereGeometry(0.32, 10, 10), skinMat);
   head.position.set(0, 1.88, 0);
@@ -859,8 +1022,19 @@ export function createPlayerMesh(name, jacketColor = "#2e7d32") {
   nameBadge.position.set(0, 2.75, 0);
 
   g.add(leftLeg, rightLeg, torso, leftArm, rightArm, head, brim, crown, nameBadge);
-  g.userData = { leftLeg, rightLeg, leftArm, rightArm, torso, nameBadge, jacketMat };
+  g.userData = { leftLeg, rightLeg, leftArm, rightArm, torso, nameBadge, jacketMat, heldHolder, currentHeldKey: "" };
+  updateThirdPersonHeldItem(g, "axe", false);
   return g;
+}
+
+export function updateThirdPersonHeldItem(playerMesh, heldId, hasSteelAxe = false) {
+  if (!playerMesh || !playerMesh.userData || !playerMesh.userData.heldHolder) return;
+  const key = `${heldId}_${hasSteelAxe ? 1 : 0}`;
+  if (playerMesh.userData.currentHeldKey === key) return;
+  playerMesh.userData.currentHeldKey = key;
+  const holder = playerMesh.userData.heldHolder;
+  while (holder.children.length > 0) holder.remove(holder.children[0]);
+  holder.add(buildHeldItemMesh(heldId, hasSteelAxe, false));
 }
 
 export function animatePlayerMesh(mesh, dt, time, isMoving, isWorking) {
