@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { Peer } from "peerjs";
 import mqtt from "mqtt";
 import { generateSecretKey, finalizeEvent } from "nostr-tools/pure";
-import { CHUNK_SIZE, getTerrainHeight, getChunkLayout } from "./world.js?v=11";
+import { CHUNK_SIZE, getTerrainHeight, getChunkLayout } from "./world.js?v=12";
 import {
   ITEMS,
   CROPS,
@@ -11,7 +11,7 @@ import {
   SHOP_GOODS,
   BAZAAR_PRICES,
   playSfx
-} from "./data.js?v=11";
+} from "./data.js?v=12";
 import {
   createTerrainChunkMesh,
   createResourceMesh,
@@ -28,7 +28,7 @@ import {
   rebuildPlankNailsMesh,
   createSingleNailMesh,
   animatePlayerMesh
-} from "./models.js?v=11";
+} from "./models.js?v=12";
 
 const savedProfile = JSON.parse(localStorage.getItem("project_dacha3_profile_v1") || "null");
 
@@ -2126,7 +2126,27 @@ function updateHandGrab(dt) {
     return;
   }
 
-  // При зажатии R предмет НЕ вращается сам — вращение происходит только движением мыши (в mousemove)!
+  // Вращение предмета кнопками R, Q, E (при удержании ЛКМ) без участия мыши вообще:
+  const rotSpeed = 1.85 * dt;
+  const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+  camRight.y = 0;
+  if (camRight.lengthSq() > 1e-4) camRight.normalize(); else camRight.set(1, 0, 0);
+  const camFwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+  camFwd.y = 0;
+  if (camFwd.lengthSq() > 1e-4) camFwd.normalize(); else camFwd.set(0, 0, -1);
+
+  if (keys["KeyR"]) {
+    const qYaw = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), rotSpeed);
+    grabState.deltaRot.premultiply(qYaw).normalize();
+  }
+  if (keys["KeyE"]) {
+    const qPitch = new THREE.Quaternion().setFromAxisAngle(camRight, rotSpeed);
+    grabState.deltaRot.premultiply(qPitch).normalize();
+  }
+  if (keys["KeyQ"]) {
+    const qRoll = new THREE.Quaternion().setFromAxisAngle(camFwd, rotSpeed);
+    grabState.deltaRot.premultiply(qRoll).normalize();
+  }
 
   const camPos = new THREE.Vector3();
   const camDir = new THREE.Vector3();
@@ -2730,22 +2750,7 @@ canvas.addEventListener("mousedown", (e) => {
 window.addEventListener("mousemove", (e) => {
   if (modalBackdrop.style.display === "flex") return;
 
-  // Если игрок держит доску пустой рукой (ЛКМ) и одновременно зажал кнопку вращения (R / Q / E / ПКМ / Shift) — вращаем ТОЛЬКО мышкой
-  if (grabState.active && isGrabRotationHeld()) {
-    const mx = document.pointerLockElement === canvas ? e.movementX : e.clientX - lastMouseX;
-    const my = document.pointerLockElement === canvas ? e.movementY : e.clientY - lastMouseY;
-    lastMouseX = e.clientX;
-    lastMouseY = e.clientY;
-    if (mx !== 0 || my !== 0) {
-      const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion).normalize();
-      const camFwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion).normalize();
-      const qYaw = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), mx * 0.011);
-      const secondAxis = keys["KeyQ"] || keys["KeyE"] ? camFwd : camRight;
-      const qTilt = new THREE.Quaternion().setFromAxisAngle(secondAxis, my * 0.011);
-      grabState.deltaRot.premultiply(qYaw).premultiply(qTilt).normalize();
-    }
-    return;
-  }
+
 
   if (document.pointerLockElement === canvas && state.started) {
     state.camYaw -= e.movementX * 0.0026;
