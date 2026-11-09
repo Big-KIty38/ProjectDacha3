@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { Peer } from "peerjs";
 import mqtt from "mqtt";
 import { generateSecretKey, finalizeEvent } from "nostr-tools/pure";
-import { CHUNK_SIZE, getTerrainHeight, getChunkLayout } from "./world.js?v=6";
+import { CHUNK_SIZE, getTerrainHeight, getChunkLayout } from "./world.js?v=7";
 import {
   ITEMS,
   CROPS,
@@ -11,7 +11,7 @@ import {
   SHOP_GOODS,
   BAZAAR_PRICES,
   playSfx
-} from "./data.js?v=6";
+} from "./data.js?v=7";
 import {
   createTerrainChunkMesh,
   createResourceMesh,
@@ -23,7 +23,7 @@ import {
   createPlayerMesh,
   createFirstPersonViewmodel,
   animatePlayerMesh
-} from "./models.js?v=6";
+} from "./models.js?v=7";
 
 const savedProfile = JSON.parse(localStorage.getItem("project_dacha3_profile_v1") || "null");
 
@@ -970,11 +970,12 @@ function findNearestInteractable() {
 
 function executeInteraction(target) {
   if (!target) return;
-  state.workTimer = 0.38;
 
   if (target.kind === "shop") return openShopModal();
   if (target.kind === "bazaar") return openBazaarModal();
   if (target.kind === "own_plot") return openBuildModal();
+
+  state.workTimer = 0.38;
 
   if (target.kind === "buy_plot") {
     const plot = target.data;
@@ -1495,8 +1496,15 @@ window.addEventListener("keydown", (e) => {
     return;
   }
   const k = e.code;
-  keys[k] = true;
   if (!state.started) return;
+
+  if (modalBackdrop.style.display === "flex") {
+    for (const key in keys) keys[key] = false;
+    if (k === "Escape" || k === "KeyE" || k === "KeyC" || k === "KeyB") closeModal(true);
+    else if (k === "KeyI" || k === "Tab") { e.preventDefault(); closeModal(true); }
+    return;
+  }
+  keys[k] = true;
 
   if (k === "KeyE") {
     if (state.buildMode) confirmPlaceBuilding();
@@ -1525,8 +1533,12 @@ let lastMouseY = 0;
 
 let pointerLockedBeforeClick = false;
 canvas.addEventListener("mousedown", (e) => {
+  if (modalBackdrop.style.display === "flex") {
+    pointerLockedBeforeClick = false;
+    return;
+  }
   pointerLockedBeforeClick = document.pointerLockElement === canvas;
-  if (state.started && modalBackdrop.style.display !== "flex" && document.pointerLockElement !== canvas) {
+  if (state.started && document.pointerLockElement !== canvas) {
     try { canvas.requestPointerLock(); } catch {}
   }
   isDraggingCam = true;
@@ -1535,6 +1547,7 @@ canvas.addEventListener("mousedown", (e) => {
   lastMouseY = e.clientY;
 });
 window.addEventListener("mousemove", (e) => {
+  if (modalBackdrop.style.display === "flex") return;
   if (document.pointerLockElement === canvas && state.started) {
     state.camYaw -= e.movementX * 0.0026;
     state.camPitch = Math.max(-1.25, Math.min(1.25, state.camPitch + e.movementY * 0.0024));
@@ -1552,11 +1565,14 @@ window.addEventListener("mousemove", (e) => {
   state.ry = state.camYaw;
 });
 window.addEventListener("mouseup", (e) => {
-  if (pointerLockedBeforeClick && !dragMoved && state.started && e.button === 0) {
+  const wasLocked = pointerLockedBeforeClick;
+  pointerLockedBeforeClick = false;
+  isDraggingCam = false;
+  if (modalBackdrop.style.display === "flex") return;
+  if (wasLocked && !dragMoved && state.started && e.button === 0 && e.target === canvas) {
     if (state.buildMode) confirmPlaceBuilding();
     else executeInteraction(findNearestInteractable());
   }
-  isDraggingCam = false;
 });
 canvas.addEventListener("contextmenu", (e) => { e.preventDefault(); if (state.buildMode) exitBuildMode(); });
 canvas.addEventListener("wheel", (e) => { state.camDist = Math.max(4.5, Math.min(24, state.camDist + e.deltaY * 0.01)); });
