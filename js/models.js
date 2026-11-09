@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { CHUNK_SIZE, getTerrainHeight, getSurfaceType } from "./world.js?v=8";
+import { CHUNK_SIZE, getTerrainHeight, getSurfaceType } from "./world.js?v=9";
 
 // ==========================================
 // ПРОЦЕДУРНЫЕ БЕСШОВНЫЕ ТЕКСТУРЫ (Трава, Береста, Кора сосны, Доски, Брус, Кирпич, Листва)
@@ -928,6 +928,12 @@ export function buildHeldItemMesh(heldId = "axe", hasSteelAxe = false, forFirstP
     lid.position.set(0, 0.165, -0.02);
     lid.renderOrder = ro + 1;
     group.add(jar, lid);
+  } else if (heldId === "plank") {
+    const board = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.045, 0.52), woodMat);
+    board.position.set(-0.02, 0.08, -0.14);
+    board.rotation.set(0.18, 0.12, -0.08);
+    board.renderOrder = ro;
+    group.add(board);
   } else {
     const itemBox = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.11, 0.11), woodMat);
     itemBox.position.set(0, 0.07, -0.02);
@@ -1053,4 +1059,107 @@ export function animatePlayerMesh(mesh, dt, time, isMoving, isWorking) {
     u.leftArm.rotation.x = Math.sin(time * 2.2) * 0.05;
     u.rightArm.rotation.x = isWorking ? Math.sin(time * 22) * 1.25 - 0.7 : -Math.sin(time * 2.2) * 0.05;
   }
+}
+
+// ==========================================
+// ФИЗИЧЕСКИЕ ДОСКИ И ГВОЗДИ В ДОСКАХ
+// ==========================================
+const NAIL_STEEL_MAT = new THREE.MeshStandardMaterial({ color: 0xcfd8dc, metalness: 0.72, roughness: 0.25 });
+const NAIL_HEAD_MAT = new THREE.MeshStandardMaterial({ color: 0x78909c, metalness: 0.78, roughness: 0.28 });
+const NAIL_HITBOX_MAT = new THREE.MeshBasicMaterial({ visible: false });
+
+export function createSingleNailMesh(nail) {
+  const nailGroup = new THREE.Group();
+  const totalLen = 0.20; // 20 см длина гвоздя для наглядности
+  const depth = Math.max(0.15, Math.min(1.0, nail.depth ?? 0.25));
+  const protrude = (1.0 - depth) * (totalLen - 0.015);
+
+  // Ось Y группы гвоздя направлена вдоль нормали поверхности наружу
+  const normal = new THREE.Vector3(nail.nx ?? 0, nail.ny ?? 1, nail.nz ?? 0).normalize();
+  const up = new THREE.Vector3(0, 1, 0);
+  nailGroup.quaternion.setFromUnitVectors(up, normal);
+  nailGroup.position.set(nail.lx || 0, nail.ly || 0, nail.lz || 0);
+
+  // Стержень гвоздя: верхушка на высоте protrude, остриё уходит внутрь доски (protrude - totalLen)
+  const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.011, 0.0035, totalLen, 8), NAIL_STEEL_MAT);
+  shaft.position.y = protrude - totalLen / 2;
+  shaft.castShadow = true;
+  nailGroup.add(shaft);
+
+  // Шляпка гвоздя на вершине стержня
+  const head = new THREE.Mesh(new THREE.CylinderGeometry(0.032, 0.032, 0.012, 10), NAIL_HEAD_MAT);
+  head.position.y = protrude + 0.004;
+  head.castShadow = true;
+  nailGroup.add(head);
+
+  // Удобный хитбокс для удара молотком
+  const hitbox = new THREE.Mesh(new THREE.CylinderGeometry(0.085, 0.085, totalLen + 0.08, 8), NAIL_HITBOX_MAT);
+  hitbox.position.y = protrude / 2;
+  hitbox.userData = { isNailHitbox: true, nailId: nail.id };
+  nailGroup.add(hitbox);
+
+  nailGroup.userData = { nailId: nail.id, depth };
+  return nailGroup;
+}
+
+export function rebuildPlankNailsMesh(plankGroup, plankData) {
+  let nailsHolder = plankGroup.userData.nailsHolder;
+  if (!nailsHolder) {
+    nailsHolder = new THREE.Group();
+    plankGroup.add(nailsHolder);
+    plankGroup.userData.nailsHolder = nailsHolder;
+  }
+  while (nailsHolder.children.length > 0) {
+    nailsHolder.remove(nailsHolder.children[0]);
+  }
+  if (Array.isArray(plankData.nails)) {
+    for (const nail of plankData.nails) {
+      const nm = createSingleNailMesh(nail);
+      nm.traverse((c) => {
+        if (c.userData && c.userData.isNailHitbox) {
+          c.userData.plankId = plankData.id;
+        }
+      });
+      nailsHolder.add(nm);
+    }
+  }
+}
+
+export function createPhysicalPlankMesh(plankData) {
+  const group = new THREE.Group();
+  const w = plankData.w || 2.4;
+  const h = plankData.h || 0.12;
+  const d = plankData.d || 0.36;
+
+  const boardMat = new THREE.MeshStandardMaterial({
+    map: TEX_WOOD_PLANK,
+    roughness: 0.8,
+    metalness: 0.04
+  });
+  const boardMesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), boardMat);
+  boardMesh.castShadow = true;
+  boardMesh.receiveShadow = true;
+  boardMesh.userData = { isPlankMesh: true, plankId: plankData.id };
+  group.add(boardMesh);
+
+  // Контурные рёбра доски, чтобы доски хорошо читались друг на друге
+  const edgesGeo = new THREE.EdgesGeometry(boardMesh.geometry);
+  const edgesMat = new THREE.LineBasicMaterial({ color: 0x3e2723, transparent: true, opacity: 0.55 });
+  const edges = new THREE.LineSegments(edgesGeo, edgesMat);
+  boardMesh.add(edges);
+
+  group.position.set(plankData.x || 0, plankData.y || h / 2, plankData.z || 0);
+  if (typeof plankData.qw === "number") {
+    group.quaternion.set(plankData.qx || 0, plankData.qy || 0, plankData.qz || 0, plankData.qw);
+  }
+
+  group.userData = {
+    plankId: plankData.id,
+    boardMesh,
+    boardMat,
+    nailsHolder: null
+  };
+
+  rebuildPlankNailsMesh(group, plankData);
+  return group;
 }

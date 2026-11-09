@@ -1353,27 +1353,73 @@ function openCraftModal() {
 }
 
 function openBuildModal() {
-  modalTitle.textContent = "🏡 Строительство домов и Огород";
-  const myPlotsCount = Object.values(state.plots).filter((p) => p.ownerKey === state.playerKey).length;
-  modalSubtitle.textContent = myPlotsCount > 0
-    ? `У вас участков: ${myPlotsCount}. Выберите постройку и разместите её на своей даче:`
-    : "💡 Совет: купите участок за 300 ₽ у таблички в СНТ, чтобы закрепить за собой территорию!";
-  modalBody.innerHTML = "";
-  BUILDINGS.forEach((b) => {
-    const can = hasResources(b.cost);
-    const card = document.createElement("div");
-    card.className = "card-item";
-    card.innerHTML = `
-      <div><div class="card-title">${b.name}</div><div class="card-desc">${b.desc}</div></div>
-      <div class="card-cost">Материалы: ${formatCostObject(b.cost)}</div>
-      <button class="card-btn" ${can ? "" : "disabled"}>Выбрать для постройки</button>
-    `;
-    card.querySelector("button").addEventListener("click", () => {
-      if (!hasResources(b.cost)) return;
-      closeModal();
-      enterBuildMode(b);
-    });
-    modalBody.appendChild(card);
+  if (modalBackdrop.style.display === "flex" && modalTitle.textContent.startsWith("🪵")) {
+    closeModal(true);
+    return;
+  }
+  modalTitle.textContent = "🪵 Строительство из физических досок и гвоздей";
+  modalSubtitle.textContent = "Все готовые постройки убраны — стройте собственные конструкции из досок с физикой и гвоздей!";
+  modalBody.innerHTML = `
+    <div class="card-item">
+      <div>
+        <div class="card-title">🪵 1. Установка досок с физикой (В наличии: <span style="color:#ffd54f">${state.inv.plank || 0} шт.</span>)</div>
+        <div class="card-desc">Возьмите <b>Доску [2]</b> в руку и нажмите <b>ЛКМ</b> (или <b>[E]</b>), чтобы поставить её. Клавиша <b>[R]</b> поворачивает доску перед установкой.</div>
+      </div>
+      <button class="card-btn" id="modal-take-plank">🖐️ Взять Доску в руку [2]</button>
+    </div>
+    <div class="card-item">
+      <div>
+        <div class="card-title">✋ 2. Перемещение и вращение пустой рукой [1]</div>
+        <div class="card-desc">Держа <b>Пустую руку [1]</b>, удерживайте <b>ЛКМ</b> на доске, чтобы переносить её. Удерживая <b>ЛКМ + R</b> (или <b>Q / E / ПКМ / Shift</b>), вращайте доску или сбитую конструкцию!</div>
+      </div>
+      <button class="card-btn" id="modal-take-hand">✋ Взять Пустую руку [1]</button>
+    </div>
+    <div class="card-item">
+      <div>
+        <div class="card-title">🔩 3. Установка гвоздей в любое место доски (В наличии: <span style="color:#ffd54f">${state.inv.nails || 0} шт.</span>)</div>
+        <div class="card-desc">Возьмите <b>Гвозди [3]</b>, наведите прицел на любое место доски и нажмите <b>ЛКМ</b> — гвоздь частично погрузится в доску (на 25%).</div>
+      </div>
+      <button class="card-btn" id="modal-take-nails">🔩 Взять Гвозди в руку [3]</button>
+    </div>
+    <div class="card-item">
+      <div>
+        <div class="card-title">🔨 4. Забивание гвоздя и параллельное склеивание [4]</div>
+        <div class="card-desc">Возьмите <b>Молоток [4]</b> и нажимайте <b>ЛКМ</b> по гвоздю, забивая его всё глубже (25% → 50% → 75% → 100%). Если две доски лежат друг на друге и гвоздь забит до конца в месте их пересечения — доски станут параллельно друг другу относительно шляпки гвоздя и склеятся!</div>
+      </div>
+      <button class="card-btn" id="modal-take-hammer">🔨 Взять Молоток в руку [4]</button>
+    </div>
+    <div class="card-item" style="grid-column:1/-1;">
+      <div>
+        <div class="card-title">📦 Пополнить запас досок и гвоздей</div>
+        <div class="card-desc">Доски пилятся из брёвен в Крафте [C], продаются в Магазине или берутся бесплатным набором здесь:</div>
+      </div>
+      <button class="card-btn" id="modal-free-kit" style="background:#ef6c00;">🎁 Взять +20 Досок и +30 Гвоздей</button>
+    </div>
+  `;
+  modalBody.querySelector("#modal-take-plank").addEventListener("click", () => {
+    selectHeldItem("plank");
+    closeModal(true);
+  });
+  modalBody.querySelector("#modal-take-hand").addEventListener("click", () => {
+    selectHeldItem("hand");
+    closeModal(true);
+  });
+  modalBody.querySelector("#modal-take-nails").addEventListener("click", () => {
+    selectHeldItem("nails");
+    closeModal(true);
+  });
+  modalBody.querySelector("#modal-take-hammer").addEventListener("click", () => {
+    selectHeldItem("hammer");
+    closeModal(true);
+  });
+  modalBody.querySelector("#modal-free-kit").addEventListener("click", () => {
+    state.inv.plank = (state.inv.plank || 0) + 20;
+    state.inv.nails = (state.inv.nails || 0) + 30;
+    playSfx("build");
+    showToast("🪵 Получено +20 досок и +30 гвоздей!");
+    updateHudUI();
+    saveLocalProfile();
+    openBuildModal();
   });
   if (document.pointerLockElement) document.exitPointerLock();
   modalBackdrop.style.display = "flex";
@@ -1533,176 +1579,675 @@ function openGardenCareModal(struct) {
 }
 
 // ==========================================
-// СТРОИТЕЛЬСТВО
+// ФИЗИКА ДОСОК, ГВОЗДИ, МОЛОТОК, ЗАХВАТ РУКОЙ И ПРИВЯЗКА К НИКУ
 // ==========================================
 const buildBanner = document.getElementById("build-banner");
 const buildSelectedName = document.getElementById("build-selected-name");
+const centerRaycaster = new THREE.Raycaster();
+const centerScreenPt = new THREE.Vector2(0, 0);
 
-const BUILDING_FOOTPRINTS = {
-  bed: { w: 3.4, d: 1.9 },
-  greenhouse: { w: 4.8, d: 3.2 },
-  fence: { w: 4.0, d: 0.4 },
-  well: { w: 1.8, d: 1.8 },
-  workbench: { w: 2.6, d: 1.4 },
-  gazebo: { w: 5.6, d: 5.6 },
-  shed: { w: 4.8, d: 3.5 },
-  house_wood: { w: 7.2, d: 6.4 },
-  banya: { w: 5.4, d: 4.6 },
-  house_terem: { w: 7.8, d: 6.8 },
-  house_brick: { w: 8.8, d: 7.4 }
-};
-
-function checkBuildPlacement(buildingDef, x, z, rot) {
-  const plot = findPlotAt(x, z);
-  if (!plot) {
-    return {
-      ok: false,
-      plot: null,
-      reason: "⚠️ Дома и постройки можно ставить только в пределах границ дачного участка!"
-    };
-  }
-  const owner = state.plots[plot.plotId];
-  if (owner && owner.ownerKey !== state.playerKey) {
-    return {
-      ok: false,
-      plot,
-      reason: `⚠️ Нельзя строить на чужом участке (владелец: ${owner.ownerName})!`
-    };
-  }
-  const fp = BUILDING_FOOTPRINTS[buildingDef.type] || { w: 4, d: 4 };
-  const cos = Math.abs(Math.cos(rot));
-  const sin = Math.abs(Math.sin(rot));
-  const halfW = (fp.w * cos + fp.d * sin) / 2;
-  const halfD = (fp.w * sin + fp.d * cos) / 2;
-  const margin = 0.3;
-  const fitsX = Math.abs(x - plot.x) + halfW <= plot.w / 2 - margin;
-  const fitsZ = Math.abs(z - plot.z) + halfD <= plot.d / 2 - margin;
-  if (!fitsX || !fitsZ) {
-    return {
-      ok: false,
-      plot,
-      reason: `⚠️ Постройка выходит за пределы участка №${plot.plotNum}! Поставьте её полностью внутри границ участка.`
-    };
-  }
-  return { ok: true, plot, reason: "" };
-}
-
-function updateGhostPlacementTint(isValid) {
-  if (buildGhostGroup.userData.lastValid === isValid) return;
-  buildGhostGroup.userData.lastValid = isValid;
-  buildGhostGroup.traverse((child) => {
-    if (child.isMesh && child.material && child.material.emissive) {
-      child.material.emissive.setHex(isValid ? 0x1b5e20 : 0xb71c1c);
-      child.material.emissiveIntensity = isValid ? 0.35 : 0.7;
-    }
-  });
-}
-
-function enterBuildMode(buildingDef) {
-  state.buildMode = buildingDef;
-  if (state.heldItem !== "hammer" && state.heldItem !== "nails") {
-    selectHeldItem("hammer", true);
-  }
-  buildSelectedName.textContent = `${buildingDef.name} (только в пределах участка • в руке Молоток [3] или Гвозди [4])`;
-  buildBanner.style.display = "block";
-  while (buildGhostGroup.children.length > 0) buildGhostGroup.remove(buildGhostGroup.children[0]);
-  const ghost = createStructureMesh({ id: "ghost", type: buildingDef.type, x: 0, z: 0, rot: 0 });
-  ghost.position.set(0, 0, 0);
-  ghost.rotation.set(0, 0, 0);
-  ghost.traverse((child) => {
-    if (child.isMesh) {
-      child.material = child.material.clone();
-      child.material.transparent = true;
-      child.material.opacity = 0.62;
-    }
-  });
-  buildGhostGroup.add(ghost);
-  buildGhostGroup.userData.lastValid = null;
-  const gPos = getBuildPreviewCoords();
-  buildGhostGroup.position.set(gPos.x, gPos.y, gPos.z);
-  buildGhostGroup.rotation.y = state.buildRot;
-  const check = checkBuildPlacement(buildingDef, gPos.x, gPos.z, state.buildRot);
-  updateGhostPlacementTint(check.ok);
-  buildGhostGroup.visible = true;
-  lockPointerSafe();
+function spawnOrUpdateStructureMesh() {
+  // Старые готовые постройки отключены
 }
 
 function exitBuildMode() {
   state.buildMode = null;
-  buildBanner.style.display = "none";
+  if (buildBanner) buildBanner.style.display = "none";
   buildGhostGroup.visible = false;
 }
 
-function getBuildPreviewCoords() {
-  state.ry = state.camYaw;
-  const dist = Math.max(3.8, Math.min(9.5, 6.2 - state.camPitch * 3.0));
-  const gx = state.x - Math.sin(state.camYaw) * dist;
-  const gz = state.z - Math.cos(state.camYaw) * dist;
-  return { x: gx, y: getTerrainHeight(gx, gz), z: gz };
+function spawnOrUpdatePlankMesh(plank) {
+  if (!plank || !plank.id) return;
+  let mesh = plankMeshes.get(plank.id);
+  if (!mesh) {
+    mesh = createPhysicalPlankMesh(plank);
+    planksRoot.add(mesh);
+    plankMeshes.set(plank.id, mesh);
+  } else {
+    mesh.position.set(plank.x, plank.y, plank.z);
+    mesh.quaternion.set(plank.qx || 0, plank.qy || 0, plank.qz || 0, plank.qw ?? 1);
+    rebuildPlankNailsMesh(mesh, plank);
+  }
+  mesh.updateMatrixWorld(true);
 }
 
-function confirmPlaceBuilding() {
-  const b = state.buildMode;
-  if (!b) return;
-  if (state.heldItem !== "hammer" && state.heldItem !== "nails") {
-    showToast("🔨 Возьмите в руку Молоток [3] или Гвозди [4], чтобы построить объект!");
-    return;
+function removePlankById(id, broadcast = true) {
+  delete state.planks[id];
+  const m = plankMeshes.get(id);
+  if (m) {
+    planksRoot.remove(m);
+    plankMeshes.delete(id);
   }
-  if (!hasResources(b.cost)) {
-    showToast("❌ Не хватает стройматериалов!");
-    exitBuildMode();
-    return;
+  saveWorldPlanks();
+  if (broadcast) {
+    broadcastNetworkPacket({ type: "plank_removed", id }, true);
   }
-  const pos = getBuildPreviewCoords();
-  const check = checkBuildPlacement(b, pos.x, pos.z, state.buildRot);
-  if (!check.ok) {
-    showToast(check.reason);
-    return;
+}
+
+function removeObjectsByOwner(ownerName, ownerKey, broadcast = true) {
+  const normName = String(ownerName || "").trim().toLowerCase();
+  for (const [pid, pl] of Object.entries(state.planks)) {
+    const pName = String(pl.ownerName || "").trim().toLowerCase();
+    if ((normName && pName === normName) || (ownerKey && pl.ownerKey === ownerKey)) {
+      delete state.planks[pid];
+      const m = plankMeshes.get(pid);
+      if (m) {
+        planksRoot.remove(m);
+        plankMeshes.delete(pid);
+      }
+    }
   }
-  const plot = check.plot;
-  state.workTimer = 0.38;
-  consumeResources(b.cost);
-  const struct = {
-    id: `st_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-    type: b.type,
-    x: Number(pos.x.toFixed(2)),
-    y: Number(pos.y.toFixed(2)),
-    z: Number(pos.z.toFixed(2)),
-    rot: state.buildRot,
-    plotId: plot ? plot.plotId : "",
-    ownerKey: state.playerKey,
-    ownerName: state.name,
-    crop: null,
-    plantedAt: 0,
-    watered: false
-  };
-  state.structures[struct.id] = struct;
-  spawnOrUpdateStructureMesh(struct);
-  playSfx("build");
-  showToast(`🏡 Построено: ${b.name}!`);
-  broadcastNetworkPacket({ type: "structure_placed", structure: struct }, true);
-  updateHudUI();
+  for (const [plotId, plotData] of Object.entries(state.plots)) {
+    const pName = String(plotData.ownerName || "").trim().toLowerCase();
+    if ((normName && pName === normName) || (ownerKey && plotData.ownerKey === ownerKey)) {
+      delete state.plots[plotId];
+    }
+  }
+  refreshAllPlotSigns();
+  saveWorldPlanks();
   saveLocalProfile();
-  if (!hasResources(b.cost)) exitBuildMode();
+  if (broadcast) {
+    broadcastNetworkPacket({ type: "clear_owner_objects", ownerName, ownerKey }, true);
+  }
+}
+
+function getAllPlankBoardMeshes() {
+  const arr = [];
+  for (const m of plankMeshes.values()) {
+    if (m.userData && m.userData.boardMesh) arr.push(m.userData.boardMesh);
+  }
+  return arr;
+}
+
+function raycastPlankSurface(maxDist = 6.2) {
+  centerRaycaster.setFromCamera(centerScreenPt, camera);
+  centerRaycaster.far = maxDist;
+  const boards = getAllPlankBoardMeshes();
+  if (boards.length === 0) return null;
+  const hits = centerRaycaster.intersectObjects(boards, false);
+  if (hits.length === 0) return null;
+  const hit = hits[0];
+  const plankId = hit.object.userData.plankId;
+  const plank = state.planks[plankId];
+  const meshGroup = plankMeshes.get(plankId);
+  if (!plank || !meshGroup) return null;
+
+  meshGroup.updateMatrixWorld(true);
+  const localPoint = meshGroup.worldToLocal(hit.point.clone());
+  const localNormal = hit.face ? hit.face.normal.clone().normalize() : new THREE.Vector3(0, 1, 0);
+  const worldNormal = localNormal.clone().transformDirection(meshGroup.matrixWorld).normalize();
+
+  return {
+    plank,
+    meshGroup,
+    point: hit.point.clone(),
+    distance: hit.distance,
+    localPoint,
+    localNormal,
+    worldNormal
+  };
+}
+
+function findNailForHammer(maxDist = 6.0) {
+  centerRaycaster.setFromCamera(centerScreenPt, camera);
+  centerRaycaster.far = maxDist;
+
+  // 1. Проверка прямого попадания луча в хитбокс гвоздя
+  const nailHitboxes = [];
+  for (const m of plankMeshes.values()) {
+    if (m.userData.nailsHolder) {
+      m.userData.nailsHolder.traverse((c) => {
+        if (c.userData && c.userData.isNailHitbox) nailHitboxes.push(c);
+      });
+    }
+  }
+  if (nailHitboxes.length > 0) {
+    const nHits = centerRaycaster.intersectObjects(nailHitboxes, false);
+    for (const h of nHits) {
+      const pId = h.object.userData.plankId;
+      const nId = h.object.userData.nailId;
+      const plank = state.planks[pId];
+      if (plank && Array.isArray(plank.nails)) {
+        const nail = plank.nails.find((n) => n.id === nId);
+        if (nail) return { plank, nail, meshGroup: plankMeshes.get(pId) };
+      }
+    }
+  }
+
+  // 2. Поиск ближайшего гвоздя вокруг точки прицела на доске (в радиусе 0.55 м)
+  const surf = raycastPlankSurface(maxDist);
+  if (surf) {
+    let best = null;
+    let bestDist = 0.55;
+    for (const plank of Object.values(state.planks)) {
+      if (!Array.isArray(plank.nails) || plank.nails.length === 0) continue;
+      const mg = plankMeshes.get(plank.id);
+      if (!mg) continue;
+      mg.updateMatrixWorld(true);
+      for (const nail of plank.nails) {
+        const nw = new THREE.Vector3(nail.lx, nail.ly, nail.lz).applyMatrix4(mg.matrixWorld);
+        const d = nw.distanceTo(surf.point) - (nail.depth < 1.0 ? 0.08 : 0);
+        if (d < bestDist) {
+          bestDist = d;
+          best = { plank, nail, meshGroup: mg };
+        }
+      }
+    }
+    if (best) return best;
+  }
+  return null;
+}
+
+function getPlankSpawnTransform() {
+  const surf = raycastPlankSurface(5.2);
+  const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, state.camYaw + state.plankSpawnYaw, 0, "YXZ"));
+  if (surf) {
+    const pos = surf.point.clone().addScaledVector(surf.worldNormal, 0.075);
+    return { x: pos.x, y: pos.y, z: pos.z, q };
+  }
+  const dir = new THREE.Vector3();
+  camera.getWorldDirection(dir);
+  const camPos = new THREE.Vector3();
+  camera.getWorldPosition(camPos);
+  const dist = 3.2;
+  const px = camPos.x + dir.x * dist;
+  const pz = camPos.z + dir.z * dist;
+  const groundY = getTerrainHeight(px, pz);
+  const py = Math.max(groundY + 0.14, camPos.y + dir.y * dist);
+  return { x: px, y: py, z: pz, q };
+}
+
+function placePhysicalPlankAction() {
+  if ((state.inv.plank || 0) <= 0) {
+    showToast("❌ У вас закончились доски! Возьмите их в меню [B] или распилите брёвна в Крафте [C].");
+    return;
+  }
+  const tr = getPlankSpawnTransform();
+  const plot = findPlotAt(tr.x, tr.z);
+  if (plot) {
+    const owner = state.plots[plot.plotId];
+    if (owner && owner.ownerKey !== state.playerKey && owner.ownerName !== state.name) {
+      showToast(`⚠️ Нельзя ставить доски на чужом участке (${owner.ownerName})!`);
+      return;
+    }
+  }
+  state.inv.plank--;
+  const id = `pl_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const plank = {
+    id,
+    w: 2.4,
+    h: 0.12,
+    d: 0.36,
+    x: +tr.x.toFixed(3),
+    y: +tr.y.toFixed(3),
+    z: +tr.z.toFixed(3),
+    qx: +tr.q.x.toFixed(5),
+    qy: +tr.q.y.toFixed(5),
+    qz: +tr.q.z.toFixed(5),
+    qw: +tr.q.w.toFixed(5),
+    vx: 0,
+    vy: 0,
+    vz: 0,
+    groupId: `grp_${id}`,
+    ownerName: state.name,
+    ownerKey: state.playerKey,
+    nails: []
+  };
+  state.planks[id] = plank;
+  spawnOrUpdatePlankMesh(plank);
+  state.workTimer = 0.32;
+  playSfx("build");
+  showToast(`🪵 Доска установлена (привязана к нику ${state.name})!`);
+  saveWorldPlanks();
+  saveLocalProfile();
+  updateHudUI();
+  broadcastNetworkPacket({ type: "plank_placed", plank }, true);
+}
+
+function placeNailAtCrosshairAction() {
+  if ((state.inv.nails || 0) <= 0) {
+    showToast("❌ Нет гвоздей! Выкуйте в Крафте [C], купите в Магазине или возьмите в меню [B].");
+    return;
+  }
+  const surf = raycastPlankSurface(5.8);
+  if (!surf) {
+    showToast("🔩 Наведите прицел на любое место доски и нажмите ЛКМ, чтобы поставить гвоздь!");
+    return;
+  }
+  state.inv.nails--;
+  const plank = surf.plank;
+  if (!Array.isArray(plank.nails)) plank.nails = [];
+  const nail = {
+    id: `nl_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    lx: +surf.localPoint.x.toFixed(4),
+    ly: +surf.localPoint.y.toFixed(4),
+    lz: +surf.localPoint.z.toFixed(4),
+    nx: +surf.localNormal.x.toFixed(4),
+    ny: +surf.localNormal.y.toFixed(4),
+    nz: +surf.localNormal.z.toFixed(4),
+    depth: 0.25,
+    weldedToPlankId: null
+  };
+  plank.nails.push(nail);
+  spawnOrUpdatePlankMesh(plank);
+  state.workTimer = 0.32;
+  playSfx("pick");
+  showToast("🔩 Гвоздь установлен в доску (погружён на 25%). Забейте его Молотком [4]!");
+  saveWorldPlanks();
+  saveLocalProfile();
+  updateHudUI();
+  broadcastNetworkPacket({ type: "plank_updated", plank }, true);
+}
+
+// Выравнивание двух пересекающихся досок параллельно друг другу относительно шляпки гвоздя и склеивание
+function checkAndWeldOverlappingPlanksAtNail(plankA, nail) {
+  const meshA = plankMeshes.get(plankA.id);
+  if (!meshA) return false;
+  meshA.updateMatrixWorld(true);
+
+  const nailWorldPos = new THREE.Vector3(nail.lx, nail.ly, nail.lz).applyMatrix4(meshA.matrixWorld);
+  const nailNormalWorld = new THREE.Vector3(nail.nx, nail.ny, nail.nz)
+    .transformDirection(meshA.matrixWorld)
+    .normalize();
+
+  // Ищем вторую доску в месте пересечения со стержнем гвоздя
+  let targetPlankB = null;
+  let bestDist = Infinity;
+
+  for (const plankB of Object.values(state.planks)) {
+    if (plankB.id === plankA.id) continue;
+    const meshB = plankMeshes.get(plankB.id);
+    if (!meshB) continue;
+    meshB.updateMatrixWorld(true);
+
+    // Проверяем точки вдоль стержня гвоздя (под шляпкой и сквозь обе доски)
+    for (const t of [-0.08, 0.0, 0.06, 0.12, 0.18, 0.25, 0.32]) {
+      const sampleWorld = nailWorldPos.clone().addScaledVector(nailNormalWorld, -t);
+      const localInB = meshB.worldToLocal(sampleWorld);
+      const insideX = Math.abs(localInB.x) <= (plankB.w || 2.4) / 2 + 0.16;
+      const insideY = Math.abs(localInB.y) <= (plankB.h || 0.12) / 2 + 0.24;
+      const insideZ = Math.abs(localInB.z) <= (plankB.d || 0.36) / 2 + 0.16;
+      if (insideX && insideY && insideZ) {
+        const d = Math.abs(localInB.y);
+        if (d < bestDist) {
+          bestDist = d;
+          targetPlankB = plankB;
+        }
+      }
+    }
+  }
+
+  if (!targetPlankB) return false;
+
+  const meshB = plankMeshes.get(targetPlankB.id);
+  meshB.updateMatrixWorld(true);
+
+  // Определяем плоскость выравнивания параллельно друг другу относительно шляпки гвоздя:
+  const qA = new THREE.Quaternion(plankA.qx || 0, plankA.qy || 0, plankA.qz || 0, plankA.qw ?? 1);
+  const qB = new THREE.Quaternion(targetPlankB.qx || 0, targetPlankB.qy || 0, targetPlankB.qz || 0, targetPlankB.qw ?? 1);
+
+  const upB = new THREE.Vector3(0, 1, 0).applyQuaternion(qB).normalize();
+  const refNormal = upB.dot(nailNormalWorld) >= 0 ? upB.clone() : upB.clone().negate();
+
+  // Вращаем доску A (и привязанные к ней доски) вокруг точки шляпки гвоздя так,
+  // чтобы нормаль под шляпкой гвоздя совпала с нормалью доски B -> обе доски становятся строго параллельны!
+  const alignQuat = new THREE.Quaternion().setFromUnitVectors(nailNormalWorld, refNormal);
+
+  const oldGroupA = plankA.groupId;
+  const newGroupId = targetPlankB.groupId || `grp_${targetPlankB.id}`;
+  targetPlankB.groupId = newGroupId;
+
+  const groupAMembers = Object.values(state.planks).filter((p) => p.groupId === oldGroupA);
+  for (const mPlank of groupAMembers) {
+    const mQuat = new THREE.Quaternion(mPlank.qx || 0, mPlank.qy || 0, mPlank.qz || 0, mPlank.qw ?? 1);
+    mQuat.premultiply(alignQuat).normalize();
+    mPlank.qx = +mQuat.x.toFixed(5);
+    mPlank.qy = +mQuat.y.toFixed(5);
+    mPlank.qz = +mQuat.z.toFixed(5);
+    mPlank.qw = +mQuat.w.toFixed(5);
+
+    const relPos = new THREE.Vector3(mPlank.x, mPlank.y, mPlank.z).sub(nailWorldPos);
+    relPos.applyQuaternion(alignQuat);
+    const newPos = nailWorldPos.clone().add(relPos);
+    mPlank.x = +newPos.x.toFixed(3);
+    mPlank.y = +newPos.y.toFixed(3);
+    mPlank.z = +newPos.z.toFixed(3);
+  }
+
+  // Плотно прижимаем параллельные доски друг к другу под шляпкой гвоздя без зазора
+  const centerB = new THREE.Vector3(targetPlankB.x, targetPlankB.y, targetPlankB.z);
+  const centerA = new THREE.Vector3(plankA.x, plankA.y, plankA.z);
+  const currentSep = centerA.clone().sub(centerB).dot(refNormal);
+  const desiredSep = ((plankA.h || 0.12) + (targetPlankB.h || 0.12)) / 2;
+  const shiftAlongNormal = desiredSep - currentSep;
+
+  for (const mPlank of groupAMembers) {
+    mPlank.x = +(mPlank.x + refNormal.x * shiftAlongNormal).toFixed(3);
+    mPlank.y = +(mPlank.y + refNormal.y * shiftAlongNormal).toFixed(3);
+    mPlank.z = +(mPlank.z + refNormal.z * shiftAlongNormal).toFixed(3);
+    mPlank.vx = 0;
+    mPlank.vy = 0;
+    mPlank.vz = 0;
+    mPlank.groupId = newGroupId;
+    spawnOrUpdatePlankMesh(mPlank);
+  }
+
+  targetPlankB.vx = 0;
+  targetPlankB.vy = 0;
+  targetPlankB.vz = 0;
+  nail.weldedToPlankId = targetPlankB.id;
+  spawnOrUpdatePlankMesh(targetPlankB);
+
+  const syncedGroup = Object.values(state.planks).filter((p) => p.groupId === newGroupId);
+  broadcastNetworkPacket({ type: "planks_batch", planks: syncedGroup }, true);
+  return true;
+}
+
+function hammerNailAtCrosshairAction() {
+  const target = findNailForHammer(6.0);
+  if (!target) {
+    state.workTimer = 0.35;
+    playSfx("chop");
+    showToast("🔨 Наведите прицел на гвоздь в доске и нажмите ЛКМ, чтобы забить его глубже!");
+    return;
+  }
+  const { plank, nail } = target;
+  state.workTimer = 0.38;
+  playSfx("chop");
+
+  if (nail.depth >= 1.0) {
+    const welded = checkAndWeldOverlappingPlanksAtNail(plank, nail);
+    if (welded) {
+      playSfx("build");
+      showToast("🔩🔨 Доски выровнены параллельно относительно шляпки гвоздя и намертво склеены!");
+      saveWorldPlanks();
+    } else {
+      showToast("✅ Этот гвоздь уже полностью забит в доску!");
+    }
+    return;
+  }
+
+  nail.depth = Math.min(1.0, +(nail.depth + 0.25).toFixed(2));
+  spawnOrUpdatePlankMesh(plank);
+
+  if (nail.depth >= 1.0) {
+    const welded = checkAndWeldOverlappingPlanksAtNail(plank, nail);
+    if (welded) {
+      playSfx("build");
+      showToast("🔩🔨 Гвоздь забит до конца! Доски стали параллельно друг другу относительно шляпки и склеились!");
+    } else {
+      showToast("🔨 Гвоздь забит до шляпки (100%)!");
+    }
+  } else {
+    showToast(`🔨 Гвоздь забит глубже в доску (${Math.round(nail.depth * 100)}%)!`);
+  }
+
+  saveWorldPlanks();
+  broadcastNetworkPacket({ type: "plank_updated", plank }, true);
+}
+
+// ==========================================
+// ЗАХВАТ И ВРАЩЕНИЕ ДОСОК ПУСТОЙ РУКОЙ (УДЕРЖАНИЕ ЛКМ + ВРАЩЕНИЕ)
+// ==========================================
+const grabState = {
+  active: false,
+  groupId: null,
+  distance: 3.2,
+  pivotPos: new THREE.Vector3(),
+  deltaRot: new THREE.Quaternion(),
+  members: []
+};
+let leftMouseDown = false;
+let rightMouseDown = false;
+
+function isGrabRotationHeld() {
+  return (
+    rightMouseDown ||
+    Boolean(
+      keys["KeyR"] ||
+      keys["KeyQ"] ||
+      keys["KeyE"] ||
+      keys["KeyF"] ||
+      keys["KeyZ"] ||
+      keys["KeyX"] ||
+      keys["ShiftLeft"] ||
+      keys["ShiftRight"] ||
+      keys["AltLeft"]
+    )
+  );
+}
+
+function tryStartHandGrab() {
+  if (state.heldItem !== "hand") return false;
+  const surf = raycastPlankSurface(6.5);
+  if (!surf) return false;
+
+  const hitPlank = surf.plank;
+  const grpId = hitPlank.groupId || `grp_${hitPlank.id}`;
+  hitPlank.groupId = grpId;
+  const members = Object.values(state.planks).filter((p) => (p.groupId || `grp_${p.id}`) === grpId);
+  if (members.length === 0) return false;
+
+  const center = new THREE.Vector3();
+  for (const p of members) center.add(new THREE.Vector3(p.x, p.y, p.z));
+  center.divideScalar(members.length);
+
+  grabState.active = true;
+  grabState.groupId = grpId;
+  grabState.distance = Math.max(1.8, Math.min(6.2, surf.distance));
+  grabState.pivotPos.copy(center);
+  grabState.deltaRot.identity();
+  grabState.members = members.map((p) => ({
+    id: p.id,
+    relPos: new THREE.Vector3(p.x, p.y, p.z).sub(center),
+    initQuat: new THREE.Quaternion(p.qx || 0, p.qy || 0, p.qz || 0, p.qw ?? 1)
+  }));
+  return true;
+}
+
+function updateHandGrab(dt) {
+  if (!grabState.active) return;
+  if (state.heldItem !== "hand" || !leftMouseDown) {
+    endHandGrab();
+    return;
+  }
+
+  // Вращение при одновременном удержании ЛКМ и клавиш R / Q / E / Z / X
+  let rotSpeed = 1.9 * dt;
+  if (keys["KeyR"]) {
+    const qYaw = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), rotSpeed);
+    grabState.deltaRot.premultiply(qYaw).normalize();
+  }
+  if (keys["KeyE"]) {
+    const qPitch = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), rotSpeed);
+    grabState.deltaRot.premultiply(qPitch).normalize();
+  }
+  if (keys["KeyQ"]) {
+    const qRoll = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), rotSpeed);
+    grabState.deltaRot.premultiply(qRoll).normalize();
+  }
+  if (keys["KeyZ"]) {
+    const qYawNeg = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -rotSpeed);
+    grabState.deltaRot.premultiply(qYawNeg).normalize();
+  }
+
+  const camPos = new THREE.Vector3();
+  const camDir = new THREE.Vector3();
+  camera.getWorldPosition(camPos);
+  camera.getWorldDirection(camDir);
+
+  const targetCenter = camPos.addScaledVector(camDir, grabState.distance);
+
+  // Не даём опустить конструкцию под землю
+  let minLift = 0;
+  for (const m of grabState.members) {
+    const pl = state.planks[m.id];
+    if (!pl) continue;
+    const newPos = targetCenter.clone().add(m.relPos.clone().applyQuaternion(grabState.deltaRot));
+    const gY = getTerrainHeight(newPos.x, newPos.z) + 0.07;
+    if (newPos.y < gY) {
+      minLift = Math.max(minLift, gY - newPos.y);
+    }
+  }
+  targetCenter.y += minLift;
+
+  for (const m of grabState.members) {
+    const pl = state.planks[m.id];
+    if (!pl) continue;
+    const newPos = targetCenter.clone().add(m.relPos.clone().applyQuaternion(grabState.deltaRot));
+    const newQuat = grabState.deltaRot.clone().multiply(m.initQuat).normalize();
+    pl.x = +newPos.x.toFixed(3);
+    pl.y = +newPos.y.toFixed(3);
+    pl.z = +newPos.z.toFixed(3);
+    pl.qx = +newQuat.x.toFixed(5);
+    pl.qy = +newQuat.y.toFixed(5);
+    pl.qz = +newQuat.z.toFixed(5);
+    pl.qw = +newQuat.w.toFixed(5);
+    pl.vx = 0;
+    pl.vy = 0;
+    pl.vz = 0;
+    const mesh = plankMeshes.get(pl.id);
+    if (mesh) {
+      mesh.position.set(pl.x, pl.y, pl.z);
+      mesh.quaternion.set(pl.qx, pl.qy, pl.qz, pl.qw);
+      mesh.updateMatrixWorld(true);
+    }
+  }
+}
+
+function endHandGrab() {
+  if (!grabState.active) return;
+  const grpId = grabState.groupId;
+  grabState.active = false;
+  grabState.groupId = null;
+  const updated = Object.values(state.planks).filter((p) => p.groupId === grpId);
+  saveWorldPlanks();
+  if (updated.length > 0) {
+    broadcastNetworkPacket({ type: "planks_batch", planks: updated }, true);
+  }
+}
+
+// ==========================================
+// СИМУЛЯЦИЯ ФИЗИКИ ДОСОК И СБИТЫХ КОНСТРУКЦИЙ
+// ==========================================
+function getPlankBottomAndTopAt(plank, wx, wz) {
+  const mesh = plankMeshes.get(plank.id);
+  if (!mesh) return null;
+  const local = mesh.worldToLocal(new THREE.Vector3(wx, plank.y, wz));
+  const hw = (plank.w || 2.4) / 2;
+  const hd = (plank.d || 0.36) / 2;
+  if (Math.abs(local.x) <= hw && Math.abs(local.z) <= hd) {
+    const topLocal = new THREE.Vector3(local.x, (plank.h || 0.12) / 2, local.z);
+    const topWorld = topLocal.applyMatrix4(mesh.matrixWorld);
+    return topWorld.y;
+  }
+  return null;
+}
+
+function stepPlanksPhysics(dt) {
+  const groups = new Map();
+  for (const pl of Object.values(state.planks)) {
+    const gid = pl.groupId || `grp_${pl.id}`;
+    pl.groupId = gid;
+    if (!groups.has(gid)) groups.set(gid, []);
+    groups.get(gid).push(pl);
+  }
+
+  let anyMoved = false;
+  for (const [gid, members] of groups.entries()) {
+    if (grabState.active && grabState.groupId === gid) continue;
+
+    // Гравитация для группы досок
+    let vy = (members[0].vy || 0) - 15.0 * dt;
+    const dy = vy * dt;
+
+    for (const pl of members) {
+      pl.y += dy;
+      pl.vy = vy;
+    }
+
+    // Проверка опоры о землю и другие доски снизу
+    let maxPenetration = 0;
+    for (const pl of members) {
+      const q = new THREE.Quaternion(pl.qx || 0, pl.qy || 0, pl.qz || 0, pl.qw ?? 1);
+      const hw = (pl.w || 2.4) / 2;
+      const hh = (pl.h || 0.12) / 2;
+      const hd = (pl.d || 0.36) / 2;
+      const samplePts = [
+        new THREE.Vector3(0, -hh, 0),
+        new THREE.Vector3(-hw, -hh, -hd),
+        new THREE.Vector3(hw, -hh, -hd),
+        new THREE.Vector3(-hw, -hh, hd),
+        new THREE.Vector3(hw, -hh, hd)
+      ];
+      for (const sp of samplePts) {
+        sp.applyQuaternion(q);
+        const wx = pl.x + sp.x;
+        const wy = pl.y + sp.y;
+        const wz = pl.z + sp.z;
+
+        let supportY = getTerrainHeight(wx, wz);
+        for (const other of Object.values(state.planks)) {
+          if (other.groupId === gid) continue;
+          if (Math.abs(other.x - wx) > 2.8 || Math.abs(other.z - wz) > 2.8) continue;
+          if (other.y > pl.y + 0.08) continue;
+          const topY = getPlankBottomAndTopAt(other, wx, wz);
+          if (topY !== null && topY <= wy + 0.28 && topY > supportY) {
+            supportY = topY;
+          }
+        }
+
+        if (wy < supportY) {
+          maxPenetration = Math.max(maxPenetration, supportY - wy);
+        }
+      }
+    }
+
+    if (maxPenetration > 0) {
+      for (const pl of members) {
+        pl.y = +(pl.y + maxPenetration).toFixed(3);
+        pl.vy = 0;
+        const m = plankMeshes.get(pl.id);
+        if (m) {
+          m.position.y = pl.y;
+          m.updateMatrixWorld(true);
+        }
+      }
+      if (Math.abs(dy) > 0.002) anyMoved = true;
+    } else {
+      anyMoved = true;
+      for (const pl of members) {
+        const m = plankMeshes.get(pl.id);
+        if (m) {
+          m.position.y = pl.y;
+          m.updateMatrixWorld(true);
+        }
+      }
+    }
+  }
+
+  if (anyMoved) {
+    saveWorldPlanks();
+  }
 }
 
 function demolishNearestStructure() {
-  let nearest = null;
-  let bestD = 4.5;
-  for (const s of Object.values(state.structures)) {
-    const d = Math.hypot(state.x - s.x, state.z - s.z);
-    if (d < bestD) { bestD = d; nearest = s; }
+  const surf = raycastPlankSurface(5.5);
+  if (!surf) {
+    showToast("Наведите прицел на доску и нажмите [X], чтобы убрать её в инвентарь.");
+    return;
   }
-  if (!nearest) return showToast("Рядом нет построек для сноса.");
-  if (nearest.ownerKey && nearest.ownerKey !== state.playerKey) {
-    return showToast(`⚠️ Это постройка игрока ${nearest.ownerName}!`);
+  const pl = surf.plank;
+  if (pl.ownerName && pl.ownerName !== state.name && pl.ownerKey !== state.playerKey) {
+    showToast(`⚠️ Эта доска привязана к нику ${pl.ownerName}!`);
+    return;
   }
-  delete state.structures[nearest.id];
-  const m = structureMeshes.get(nearest.id);
-  if (m) { structuresRoot.remove(m); structureMeshes.delete(nearest.id); }
+  removePlankById(pl.id, true);
+  state.inv.plank = (state.inv.plank || 0) + 1;
   playSfx("chop");
-  showToast("🔨 Постройка разобрана.");
-  broadcastNetworkPacket({ type: "structure_removed", id: nearest.id }, true);
+  showToast("🪵 Доска возвращена в инвентарь.");
+  updateHudUI();
+  saveLocalProfile();
 }
 
 // ==========================================
@@ -1735,15 +2280,20 @@ window.addEventListener("keydown", (e) => {
     }
   }
 
-  if (k === "KeyE") {
-    if (state.buildMode) confirmPlaceBuilding();
+  if (k === "KeyR" && !grabState.active) {
+    state.plankSpawnYaw = (state.plankSpawnYaw + Math.PI / 4) % (Math.PI * 2);
+  }
+
+  if (k === "KeyE" && !grabState.active) {
+    if (state.heldItem === "plank") placePhysicalPlankAction();
+    else if (state.heldItem === "nails") placeNailAtCrosshairAction();
+    else if (state.heldItem === "hammer") hammerNailAtCrosshairAction();
     else executeInteraction(findNearestInteractable());
   } else if (k === "KeyI" || k === "Tab") { e.preventDefault(); openInventoryModal(); }
-  else if (k === "KeyF") eatFoodAction();
+  else if (k === "KeyF" && !grabState.active) eatFoodAction();
   else if (k === "KeyC") openCraftModal();
-  else if (k === "KeyB") { if (state.buildMode) exitBuildMode(); else openBuildModal(); }
-  else if (k === "KeyR" && state.buildMode) state.buildRot = (state.buildRot + Math.PI / 2) % (Math.PI * 2);
-  else if (k === "KeyX") demolishNearestStructure();
+  else if (k === "KeyB") openBuildModal();
+  else if (k === "KeyX" && !grabState.active) demolishNearestStructure();
   else if (k === "KeyV") {
     state.firstPerson = !state.firstPerson;
     selfMesh.visible = !state.firstPerson;
@@ -1759,24 +2309,50 @@ let isDraggingCam = false;
 let dragMoved = false;
 let lastMouseX = 0;
 let lastMouseY = 0;
-
 let pointerLockedBeforeClick = false;
+let grabStartedThisClick = false;
+
 canvas.addEventListener("mousedown", (e) => {
   if (modalBackdrop.style.display === "flex") {
     pointerLockedBeforeClick = false;
     return;
   }
+  if (e.button === 0) leftMouseDown = true;
+  if (e.button === 2) rightMouseDown = true;
+
   pointerLockedBeforeClick = document.pointerLockElement === canvas;
   if (state.started && document.pointerLockElement !== canvas) {
     try { canvas.requestPointerLock(); } catch {}
   }
+
+  grabStartedThisClick = false;
+  if (e.button === 0 && state.started && pointerLockedBeforeClick && state.heldItem === "hand") {
+    if (tryStartHandGrab()) {
+      grabStartedThisClick = true;
+    }
+  }
+
   isDraggingCam = true;
   dragMoved = false;
   lastMouseX = e.clientX;
   lastMouseY = e.clientY;
 });
+
 window.addEventListener("mousemove", (e) => {
   if (modalBackdrop.style.display === "flex") return;
+
+  // Если игрок держит доску пустой рукой (ЛКМ) и одновременно зажал кнопку вращения (R / Q / E / ПКМ / Shift)
+  if (grabState.active && isGrabRotationHeld()) {
+    const mx = document.pointerLockElement === canvas ? e.movementX : e.clientX - lastMouseX;
+    const my = document.pointerLockElement === canvas ? e.movementY : e.clientY - lastMouseY;
+    lastMouseX = e.clientX;
+    lastMouseY = e.clientY;
+    const qYaw = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), mx * 0.012);
+    const qPitch = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), my * 0.012);
+    grabState.deltaRot.premultiply(qYaw).premultiply(qPitch).normalize();
+    return;
+  }
+
   if (document.pointerLockElement === canvas && state.started) {
     state.camYaw -= e.movementX * 0.0026;
     state.camPitch = Math.max(-1.25, Math.min(1.25, state.camPitch + e.movementY * 0.0024));
@@ -1793,14 +2369,27 @@ window.addEventListener("mousemove", (e) => {
   state.camPitch = Math.max(-1.2, Math.min(1.2, state.camPitch + dy * 0.005));
   state.ry = state.camYaw;
 });
+
 window.addEventListener("mouseup", (e) => {
+  if (e.button === 0) leftMouseDown = false;
+  if (e.button === 2) rightMouseDown = false;
+
+  if (e.button === 0 && grabState.active) {
+    endHandGrab();
+  }
+
   const wasLocked = pointerLockedBeforeClick;
   pointerLockedBeforeClick = false;
   isDraggingCam = false;
   if (modalBackdrop.style.display === "flex") return;
-  if (wasLocked && !dragMoved && state.started && e.button === 0 && e.target === canvas) {
-    if (state.buildMode) {
-      confirmPlaceBuilding();
+
+  if (wasLocked && !dragMoved && !grabStartedThisClick && state.started && e.button === 0 && e.target === canvas) {
+    if (state.heldItem === "plank") {
+      placePhysicalPlankAction();
+    } else if (state.heldItem === "nails") {
+      placeNailAtCrosshairAction();
+    } else if (state.heldItem === "hammer") {
+      hammerNailAtCrosshairAction();
     } else {
       const nearest = findNearestInteractable();
       if (nearest) executeInteraction(nearest);
@@ -1808,9 +2397,15 @@ window.addEventListener("mouseup", (e) => {
       else state.workTimer = 0.32;
     }
   }
+  grabStartedThisClick = false;
 });
-canvas.addEventListener("contextmenu", (e) => { e.preventDefault(); if (state.buildMode) exitBuildMode(); });
+
+canvas.addEventListener("contextmenu", (e) => { e.preventDefault(); });
 canvas.addEventListener("wheel", (e) => {
+  if (grabState.active) {
+    grabState.distance = Math.max(1.5, Math.min(7.0, grabState.distance - e.deltaY * 0.003));
+    return;
+  }
   if (state.firstPerson) {
     cycleHotbarSlot(e.deltaY > 0 ? 1 : -1);
   } else {
@@ -2047,13 +2642,17 @@ document.querySelectorAll(".color-swatch").forEach((sw) => {
   });
 });
 
-const resetBtn = document.getElementById("reset-profile-btn");
-if (resetBtn) {
-  resetBtn.addEventListener("click", () => {
-    localStorage.removeItem("project_dacha3_profile_v1");
-    window.location.reload();
-  });
+function resetPlayerProgressAndObjects() {
+  const nick = (nickInput?.value || state.name || "").trim();
+  removeObjectsByOwner(nick || state.name, state.playerKey, true);
+  localStorage.removeItem("project_dacha3_profile_v1");
+  setTimeout(() => window.location.reload(), 120);
 }
+
+const resetBtn = document.getElementById("reset-profile-btn");
+if (resetBtn) resetBtn.addEventListener("click", resetPlayerProgressAndObjects);
+const hudResetBtn = document.getElementById("btn-reset");
+if (hudResetBtn) hudResetBtn.addEventListener("click", resetPlayerProgressAndObjects);
 
 function startGame() {
   const enteredName = nickInput.value.trim().slice(0, 20);
@@ -2085,8 +2684,8 @@ function startGame() {
   cleanupDepartedPlayers();
   ensureChunksAroundPlayer();
   refreshAllPlotSigns();
-  for (const s of Object.values(state.structures)) {
-    spawnOrUpdateStructureMesh(s);
+  for (const pl of Object.values(state.planks)) {
+    spawnOrUpdatePlankMesh(pl);
   }
   updateHudUI();
   initMultiplayerNetwork();
@@ -2132,7 +2731,7 @@ function animate(now) {
 
   let isMoving = false;
   if (state.started) {
-    if (keys["KeyQ"]) state.camYaw += 1.8 * dt;
+    if (keys["KeyQ"] && !grabState.active) state.camYaw += 1.8 * dt;
 
     let fwd = 0;
     let right = 0;
@@ -2212,12 +2811,31 @@ function animate(now) {
     }
   }
 
-  if (state.buildMode && buildGhostGroup.visible) {
-    const gPos = getBuildPreviewCoords();
-    buildGhostGroup.position.set(gPos.x, gPos.y, gPos.z);
-    buildGhostGroup.rotation.y = state.buildRot;
-    const check = checkBuildPlacement(state.buildMode, gPos.x, gPos.z, state.buildRot);
-    updateGhostPlacementTint(check.ok);
+  if (state.started) {
+    updateHandGrab(dt);
+    stepPlanksPhysics(dt);
+
+    if (state.heldItem === "plank" && (state.inv.plank || 0) > 0 && modalBackdrop.style.display !== "flex") {
+      const tr = getPlankSpawnTransform();
+      plankPreviewMesh.position.set(tr.x, tr.y, tr.z);
+      plankPreviewMesh.quaternion.copy(tr.q);
+      plankPreviewMesh.visible = true;
+    } else {
+      plankPreviewMesh.visible = false;
+    }
+
+    if (state.heldItem === "nails" && (state.inv.nails || 0) > 0 && modalBackdrop.style.display !== "flex") {
+      const surf = raycastPlankSurface(5.8);
+      if (surf) {
+        nailPreviewGroup.position.copy(surf.point);
+        nailPreviewGroup.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), surf.worldNormal);
+        nailPreviewGroup.visible = true;
+      } else {
+        nailPreviewGroup.visible = false;
+      }
+    } else {
+      nailPreviewGroup.visible = false;
+    }
   }
 
   cropVisualAccum += dt;

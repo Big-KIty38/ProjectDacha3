@@ -451,10 +451,11 @@ html, body {
 
 /* INVENTORY BAR BOTTOM */
 .hud-bottom {
-  position: absolute;
-  bottom: 12px;
+  position: fixed;
+  bottom: 14px;
   left: 50%;
   transform: translateX(-50%);
+  z-index: 30;
   display: flex;
   flex-direction: column;
   align-items: center;
