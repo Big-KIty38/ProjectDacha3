@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { Peer } from "peerjs";
 import mqtt from "mqtt";
 import { generateSecretKey, finalizeEvent } from "nostr-tools/pure";
-import { CHUNK_SIZE, getTerrainHeight, getChunkLayout } from "./world.js?v=8";
+import { CHUNK_SIZE, getTerrainHeight, getChunkLayout } from "./world.js?v=10";
 import {
   ITEMS,
   CROPS,
@@ -11,7 +11,7 @@ import {
   SHOP_GOODS,
   BAZAAR_PRICES,
   playSfx
-} from "./data.js?v=8";
+} from "./data.js?v=10";
 import {
   createTerrainChunkMesh,
   createResourceMesh,
@@ -24,8 +24,11 @@ import {
   createFirstPersonViewmodel,
   updateFirstPersonHeldItem,
   updateThirdPersonHeldItem,
+  createPhysicalPlankMesh,
+  rebuildPlankNailsMesh,
+  createSingleNailMesh,
   animatePlayerMesh
-} from "./models.js?v=8";
+} from "./models.js?v=10";
 
 const savedProfile = JSON.parse(localStorage.getItem("project_dacha3_profile_v1") || "null");
 
@@ -83,8 +86,30 @@ const state = {
   remotePlayers: new Map()
 };
 
-if (state.inv.nails === undefined) {
-  state.inv.nails = 15;
+const WORLD_PLANKS_STORAGE_KEY = "project_dacha3_world_planks_v1";
+
+function loadSavedWorldPlanks() {
+  try {
+    const raw = localStorage.getItem(WORLD_PLANKS_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveWorldPlanks() {
+  try {
+    localStorage.setItem(WORLD_PLANKS_STORAGE_KEY, JSON.stringify(state.planks || {}));
+  } catch {}
+}
+
+state.structures = {};
+state.planks = loadSavedWorldPlanks();
+state.plankSpawnYaw = 0;
+
+if (!savedProfile?.plankSystemV9) {
+  state.inv.plank = Math.max(state.inv.plank || 0, 25);
+  state.inv.nails = Math.max(state.inv.nails || 0, 40);
   if ((state.inv.pie || 0) === 0 && (state.inv.berry || 0) === 0) {
     state.inv.pie = 1;
     state.inv.berry = 3;
@@ -107,7 +132,8 @@ function saveLocalProfile() {
         heldItem: state.heldItem,
         inv: state.inv,
         plots: state.plots,
-        structures: state.structures,
+        plankSystemV9: true,
+        structures: {},
         harvested: state.harvested
       })
     );
@@ -161,6 +187,28 @@ scene.add(buildGhostGroup);
 const structuresRoot = new THREE.Group();
 scene.add(structuresRoot);
 const structureMeshes = new Map();
+
+const planksRoot = new THREE.Group();
+scene.add(planksRoot);
+const plankMeshes = new Map();
+
+const nailPreviewGroup = new THREE.Group();
+const nailPreviewInner = createSingleNailMesh({ id: "preview", lx: 0, ly: 0, lz: 0, nx: 0, ny: 1, nz: 0, depth: 0.25 });
+nailPreviewGroup.add(nailPreviewInner);
+nailPreviewGroup.visible = false;
+scene.add(nailPreviewGroup);
+
+const plankPreviewMesh = createPhysicalPlankMesh({ id: "ghost_plank", w: 2.4, h: 0.12, d: 0.36, x: 0, y: 0, z: 0, qx: 0, qy: 0, qz: 0, qw: 1, nails: [] });
+plankPreviewMesh.traverse((c) => {
+  if (c.isMesh && c.material) {
+    c.material = c.material.clone();
+    c.material.transparent = true;
+    c.material.opacity = 0.5;
+  }
+});
+plankPreviewMesh.visible = false;
+scene.add(plankPreviewMesh);
+
 const loadedChunks = new Map();
 
 
@@ -377,7 +425,8 @@ function setupPeerConnection(conn) {
         pktId: `${state.playerKey}_snap_${Date.now()}`,
         senderKey: state.playerKey,
         plots: state.plots,
-        structures: state.structures,
+        plankSystemV9: true,
+        structures: {},
         harvested: state.harvested
       });
     }
@@ -487,11 +536,11 @@ function sendMyPresenceAndWorldSnapshot() {
   if (!state.started) return;
   broadcastNetworkPacket(buildPresencePacket("player_joined"), false);
 
-  if (Object.keys(state.plots).length > 0 || Object.keys(state.structures).length > 0) {
+  if (Object.keys(state.plots).length > 0 || Object.keys(state.planks).length > 0) {
     broadcastNetworkPacket({
       type: "world_sync_snapshot",
       plots: state.plots,
-      structures: state.structures,
+      planks: state.planks,
       harvested: state.harvested
     }, true);
   }
@@ -509,13 +558,14 @@ function mergeWorldSnapshot(pkt) {
   }
   if (changedPlots) refreshAllPlotSigns();
 
-  if (pkt.structures && typeof pkt.structures === "object") {
-    for (const [sid, sdata] of Object.entries(pkt.structures)) {
-      if (!state.structures[sid]) {
-        state.structures[sid] = sdata;
-        spawnOrUpdateStructureMesh(sdata);
+  if (pkt.planks && typeof pkt.planks === "object") {
+    for (const [pid, pdata] of Object.entries(pkt.planks)) {
+      if (pdata && pdata.id) {
+        state.planks[pid] = pdata;
+        spawnOrUpdatePlankMesh(pdata);
       }
     }
+    saveWorldPlanks();
   }
 
   if (pkt.harvested && typeof pkt.harvested === "object") {
@@ -645,12 +695,36 @@ function handleIncomingPacket(pkt) {
       saveLocalProfile();
       break;
     }
+    case "plank_placed":
+    case "plank_updated": {
+      const pl = pkt.plank;
+      if (!pl || !pl.id) return;
+      state.planks[pl.id] = pl;
+      spawnOrUpdatePlankMesh(pl);
+      saveWorldPlanks();
+      break;
+    }
+    case "planks_batch": {
+      if (Array.isArray(pkt.planks)) {
+        for (const pl of pkt.planks) {
+          if (pl && pl.id) {
+            state.planks[pl.id] = pl;
+            spawnOrUpdatePlankMesh(pl);
+          }
+        }
+        saveWorldPlanks();
+      }
+      break;
+    }
+    case "plank_removed": {
+      if (pkt.id) removePlankById(pkt.id, false);
+      break;
+    }
+    case "clear_owner_objects": {
+      removeObjectsByOwner(pkt.ownerName, pkt.ownerKey, false);
+      break;
+    }
     case "structure_placed": {
-      const s = pkt.structure;
-      if (!s || !s.id) return;
-      state.structures[s.id] = s;
-      spawnOrUpdateStructureMesh(s);
-      saveLocalProfile();
       break;
     }
     case "structure_removed": {
@@ -1104,10 +1178,11 @@ function executeInteraction(target) {
 const FOOD_KEYS = ["pie", "berry", "potato", "cucumber", "tomato", "strawberry", "jam", "pickles"];
 
 export function getHeldItemTitle(id = state.heldItem) {
-  if (id === "hand") return "✋ Пустая рука";
+  if (id === "hand") return "✋ Пустая рука (Удерж. ЛКМ — тащить • ЛКМ + R/Q/E/ПКМ — вращать доску)";
+  if (id === "plank") return `🪵 Доска (${state.inv.plank || 0} шт. • ЛКМ — поставить • [R] — повернуть)`;
+  if (id === "nails") return `🔩 Гвозди (${state.inv.nails || 0} шт. • ЛКМ по доске — воткнуть гвоздь)`;
+  if (id === "hammer") return "🔨 Молоток (ЛКМ по гвоздю — забивать в доску и сбивать доски)";
   if (id === "axe") return state.tools.axe ? "🪓 Стальной топор (x2 дерево)" : "🪓 Топор дачника";
-  if (id === "hammer") return "🔨 Строительный молоток";
-  if (id === "nails") return `🔩 Гвозди (${state.inv.nails || 0} шт.)`;
   if (id === "watering_can") return "🚿 Садовая лейка";
   if (ITEMS[id]) {
     const info = ITEMS[id];
@@ -1120,9 +1195,10 @@ export function getHeldItemTitle(id = state.heldItem) {
 function getHotbarSlots() {
   const slots = [
     { id: "hand", icon: "✋", name: "Рука", count: null, kind: "tool" },
-    { id: "axe", icon: "🪓", name: state.tools.axe ? "Сталь. топор" : "Топор", count: null, kind: "tool" },
+    { id: "plank", icon: "🪵", name: "Доска", count: state.inv.plank || 0, kind: "item" },
+    { id: "nails", icon: "🔩", name: "Гвозди", count: state.inv.nails || 0, kind: "item" },
     { id: "hammer", icon: "🔨", name: "Молоток", count: null, kind: "tool" },
-    { id: "nails", icon: "🔩", name: "Гвозди", count: state.inv.nails || 0, kind: "item" }
+    { id: "axe", icon: "🪓", name: state.tools.axe ? "Сталь. топор" : "Топор", count: null, kind: "tool" }
   ];
   if (state.tools.watering_can) {
     slots.push({ id: "watering_can", icon: "🚿", name: "Лейка", count: null, kind: "tool" });
@@ -1166,7 +1242,7 @@ function selectHeldItem(id, silent = false) {
     showToast("🍓 У вас пока нет ягод! Соберите их с ягодного куста [E] или купите пирожок в Магазине.");
     return;
   }
-  if (ITEMS[id] && id !== "nails" && (state.inv[id] || 0) <= 0) {
+  if (ITEMS[id] && id !== "nails" && id !== "plank" && (state.inv[id] || 0) <= 0) {
     state.heldItem = "hand";
   } else {
     state.heldItem = id;
@@ -1586,9 +1662,7 @@ const buildSelectedName = document.getElementById("build-selected-name");
 const centerRaycaster = new THREE.Raycaster();
 const centerScreenPt = new THREE.Vector2(0, 0);
 
-function spawnOrUpdateStructureMesh() {
-  // Старые готовые постройки отключены
-}
+
 
 function exitBuildMode() {
   state.buildMode = null;
