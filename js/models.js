@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { CHUNK_SIZE, getTerrainHeight, getSurfaceType } from "./world.js?v=10";
+import { CHUNK_SIZE, getTerrainHeight, getSurfaceType } from "./world.js?v=11";
 
 // ==========================================
 // ПРОЦЕДУРНЫЕ БЕСШОВНЫЕ ТЕКСТУРЫ (Трава, Береста, Кора сосны, Доски, Брус, Кирпич, Листва)

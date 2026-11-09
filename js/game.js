@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { Peer } from "peerjs";
 import mqtt from "mqtt";
 import { generateSecretKey, finalizeEvent } from "nostr-tools/pure";
-import { CHUNK_SIZE, getTerrainHeight, getChunkLayout } from "./world.js?v=10";
+import { CHUNK_SIZE, getTerrainHeight, getChunkLayout } from "./world.js?v=11";
 import {
   ITEMS,
   CROPS,
@@ -11,7 +11,7 @@ import {
   SHOP_GOODS,
   BAZAAR_PRICES,
   playSfx
-} from "./data.js?v=10";
+} from "./data.js?v=11";
 import {
   createTerrainChunkMesh,
   createResourceMesh,
@@ -28,7 +28,7 @@ import {
   rebuildPlankNailsMesh,
   createSingleNailMesh,
   animatePlayerMesh
-} from "./models.js?v=10";
+} from "./models.js?v=11";
 
 const savedProfile = JSON.parse(localStorage.getItem("project_dacha3_profile_v1") || "null");
 
@@ -2126,24 +2126,7 @@ function updateHandGrab(dt) {
     return;
   }
 
-  // Вращение при одновременном удержании ЛКМ и клавиш R / Q / E / Z / X
-  let rotSpeed = 1.9 * dt;
-  if (keys["KeyR"]) {
-    const qYaw = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), rotSpeed);
-    grabState.deltaRot.premultiply(qYaw).normalize();
-  }
-  if (keys["KeyE"]) {
-    const qPitch = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), rotSpeed);
-    grabState.deltaRot.premultiply(qPitch).normalize();
-  }
-  if (keys["KeyQ"]) {
-    const qRoll = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), rotSpeed);
-    grabState.deltaRot.premultiply(qRoll).normalize();
-  }
-  if (keys["KeyZ"]) {
-    const qYawNeg = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -rotSpeed);
-    grabState.deltaRot.premultiply(qYawNeg).normalize();
-  }
+  // При зажатии R предмет НЕ вращается сам — вращение происходит только движением мыши (в mousemove)!
 
   const camPos = new THREE.Vector3();
   const camDir = new THREE.Vector3();
@@ -2168,6 +2151,9 @@ function updateHandGrab(dt) {
   for (const m of grabState.members) {
     const pl = state.planks[m.id];
     if (!pl) continue;
+    const prevX = pl.x;
+    const prevY = pl.y;
+    const prevZ = pl.z;
     const newPos = targetCenter.clone().add(m.relPos.clone().applyQuaternion(grabState.deltaRot));
     const newQuat = grabState.deltaRot.clone().multiply(m.initQuat).normalize();
     pl.x = +newPos.x.toFixed(3);
@@ -2177,9 +2163,12 @@ function updateHandGrab(dt) {
     pl.qy = +newQuat.y.toFixed(5);
     pl.qz = +newQuat.z.toFixed(5);
     pl.qw = +newQuat.w.toFixed(5);
-    pl.vx = 0;
-    pl.vy = 0;
-    pl.vz = 0;
+    pl.vx = Math.max(-8, Math.min(8, +((pl.x - prevX) / Math.max(0.01, dt) * 0.35).toFixed(3)));
+    pl.vy = Math.max(-8, Math.min(8, +((pl.y - prevY) / Math.max(0.01, dt) * 0.35).toFixed(3)));
+    pl.vz = Math.max(-8, Math.min(8, +((pl.z - prevZ) / Math.max(0.01, dt) * 0.35).toFixed(3)));
+    pl.wx = 0;
+    pl.wy = 0;
+    pl.wz = 0;
     const mesh = plankMeshes.get(pl.id);
     if (mesh) {
       mesh.position.set(pl.x, pl.y, pl.z);
@@ -2202,105 +2191,431 @@ function endHandGrab() {
 }
 
 // ==========================================
-// СИМУЛЯЦИЯ ФИЗИКИ ДОСОК И СБИТЫХ КОНСТРУКЦИЙ
+// РЕАЛИСТИЧНАЯ 3D-ФИЗИКА ДОСОК (OBB SAT-КОЛЛИЗИИ, ИМПУЛЬСЫ, КРУТЯЩИЙ МОМЕНТ И ОПРОКИДЫВАНИЕ)
 // ==========================================
-function getPlankBottomAndTopAt(plank, wx, wz) {
-  const mesh = plankMeshes.get(plank.id);
-  if (!mesh) return null;
-  const local = mesh.worldToLocal(new THREE.Vector3(wx, plank.y, wz));
-  const hw = (plank.w || 2.4) / 2;
-  const hd = (plank.d || 0.36) / 2;
-  if (Math.abs(local.x) <= hw && Math.abs(local.z) <= hd) {
-    const topLocal = new THREE.Vector3(local.x, (plank.h || 0.12) / 2, local.z);
-    const topWorld = topLocal.applyMatrix4(mesh.matrixWorld);
-    return topWorld.y;
+function buildPlankOBB(pl) {
+  const q = new THREE.Quaternion(pl.qx || 0, pl.qy || 0, pl.qz || 0, pl.qw ?? 1).normalize();
+  const u0 = new THREE.Vector3(1, 0, 0).applyQuaternion(q);
+  const u1 = new THREE.Vector3(0, 1, 0).applyQuaternion(q);
+  const u2 = new THREE.Vector3(0, 0, 1).applyQuaternion(q);
+  const e0 = (pl.w || 2.4) / 2;
+  const e1 = (pl.h || 0.12) / 2;
+  const e2 = (pl.d || 0.36) / 2;
+  const center = new THREE.Vector3(pl.x, pl.y, pl.z);
+
+  const corners = [];
+  for (const sx of [-1, 1]) {
+    for (const sy of [-1, 1]) {
+      for (const sz of [-1, 1]) {
+        corners.push(
+          center
+            .clone()
+            .addScaledVector(u0, sx * e0)
+            .addScaledVector(u1, sy * e1)
+            .addScaledVector(u2, sz * e2)
+        );
+      }
+    }
   }
-  return null;
+  // Дополнительные точки вдоль длинных рёбер для точного контакта при перекрещивании досок
+  for (const sy of [-1, 1]) {
+    for (const sz of [-1, 1]) {
+      corners.push(center.clone().addScaledVector(u1, sy * e1).addScaledVector(u2, sz * e2));
+      corners.push(center.clone().addScaledVector(u0, 0.5 * e0).addScaledVector(u1, sy * e1).addScaledVector(u2, sz * e2));
+      corners.push(center.clone().addScaledVector(u0, -0.5 * e0).addScaledVector(u1, sy * e1).addScaledVector(u2, sz * e2));
+    }
+  }
+
+  return { pl, q, center, axes: [u0, u1, u2], half: [e0, e1, e2], corners };
 }
 
-function stepPlanksPhysics(dt) {
-  const groups = new Map();
-  for (const pl of Object.values(state.planks)) {
-    const gid = pl.groupId || `grp_${pl.id}`;
-    pl.groupId = gid;
-    if (!groups.has(gid)) groups.set(gid, []);
-    groups.get(gid).push(pl);
+function projectOBBOnAxis(obb, axis) {
+  const cProj = obb.center.dot(axis);
+  const r =
+    obb.half[0] * Math.abs(obb.axes[0].dot(axis)) +
+    obb.half[1] * Math.abs(obb.axes[1].dot(axis)) +
+    obb.half[2] * Math.abs(obb.axes[2].dot(axis));
+  return { min: cProj - r, max: cProj + r, r };
+}
+
+function pointInsideOBBMargin(pt, obb, margin = 0.03) {
+  const d = pt.clone().sub(obb.center);
+  return (
+    Math.abs(d.dot(obb.axes[0])) <= obb.half[0] + margin &&
+    Math.abs(d.dot(obb.axes[1])) <= obb.half[1] + margin &&
+    Math.abs(d.dot(obb.axes[2])) <= obb.half[2] + margin
+  );
+}
+
+function clampPointToOBB(pt, obb) {
+  const d = pt.clone().sub(obb.center);
+  const out = obb.center.clone();
+  for (let i = 0; i < 3; i++) {
+    const c = Math.max(-obb.half[i], Math.min(obb.half[i], d.dot(obb.axes[i])));
+    out.addScaledVector(obb.axes[i], c);
+  }
+  return out;
+}
+
+// Полный 15-осевой SAT-тест столкновения двух 3D-досок (OBB vs OBB)
+function testOBBCollision(obbA, obbB) {
+  const diff = obbA.center.clone().sub(obbB.center);
+  if (diff.lengthSq() > 26.0) return null;
+
+  let minOverlap = Infinity;
+  let bestAxis = null;
+
+  const candidateAxes = [
+    obbA.axes[0],
+    obbA.axes[1],
+    obbA.axes[2],
+    obbB.axes[0],
+    obbB.axes[1],
+    obbB.axes[2]
+  ];
+  for (let i = 0; i < 3; i++) {
+    for (let j = 0; j < 3; j++) {
+      const cross = new THREE.Vector3().crossVectors(obbA.axes[i], obbB.axes[j]);
+      if (cross.lengthSq() > 1e-5) {
+        candidateAxes.push(cross.normalize());
+      }
+    }
   }
 
-  let anyMoved = false;
-  for (const [gid, members] of groups.entries()) {
-    if (grabState.active && grabState.groupId === gid) continue;
+  for (const ax of candidateAxes) {
+    const pA = projectOBBOnAxis(obbA, ax);
+    const pB = projectOBBOnAxis(obbB, ax);
+    const overlap = Math.min(pA.max, pB.max) - Math.max(pA.min, pB.min);
+    if (overlap <= 0) return null;
+    if (overlap < minOverlap) {
+      minOverlap = overlap;
+      bestAxis = ax.clone();
+    }
+  }
 
-    // Гравитация для группы досок
-    let vy = (members[0].vy || 0) - 15.0 * dt;
-    const dy = vy * dt;
+  if (!bestAxis) return null;
+  if (diff.dot(bestAxis) < 0) bestAxis.negate(); // Нормаль от B к A
 
-    for (const pl of members) {
-      pl.y += dy;
-      pl.vy = vy;
+  // Находим реальные точки контакта между досками (для расчёта плеча силы и опрокидывания)
+  const contactPts = [];
+  for (const c of obbA.corners) {
+    if (pointInsideOBBMargin(c, obbB, 0.04)) contactPts.push(c);
+  }
+  for (const c of obbB.corners) {
+    if (pointInsideOBBMargin(c, obbA, 0.04)) contactPts.push(c);
+  }
+
+  const contactPoint = new THREE.Vector3();
+  if (contactPts.length > 0) {
+    for (const p of contactPts) contactPoint.add(p);
+    contactPoint.divideScalar(contactPts.length);
+  } else {
+    const pOnB = clampPointToOBB(obbA.center, obbB);
+    const pOnA = clampPointToOBB(pOnB, obbA);
+    contactPoint.addVectors(pOnA, pOnB).multiplyScalar(0.5);
+  }
+
+  return {
+    normal: bestAxis, // направлена от B к A
+    depth: minOverlap,
+    point: contactPoint
+  };
+}
+
+function applyBodyRotationDelta(body, angDelta) {
+  const len = angDelta.length();
+  if (len < 1e-6) return;
+  const maxStep = 0.35;
+  const axis = angDelta.clone().normalize();
+  const angle = Math.min(len, maxStep);
+  const dq = new THREE.Quaternion().setFromAxisAngle(axis, angle);
+
+  for (const pl of body.members) {
+    const rel = new THREE.Vector3(pl.x, pl.y, pl.z).sub(body.com);
+    rel.applyQuaternion(dq);
+    pl.x = body.com.x + rel.x;
+    pl.y = body.com.y + rel.y;
+    pl.z = body.com.z + rel.z;
+
+    const q = new THREE.Quaternion(pl.qx || 0, pl.qy || 0, pl.qz || 0, pl.qw ?? 1);
+    q.premultiply(dq).normalize();
+    pl.qx = q.x;
+    pl.qy = q.y;
+    pl.qz = q.z;
+    pl.qw = q.w;
+  }
+}
+
+function translateBody(body, delta) {
+  body.com.add(delta);
+  for (const pl of body.members) {
+    pl.x += delta.x;
+    pl.y += delta.y;
+    pl.z += delta.z;
+  }
+}
+
+let physicsSaveTimer = 0;
+
+function stepPlanksPhysics(dt) {
+  const plankList = Object.values(state.planks);
+  if (plankList.length === 0) return;
+
+  const subSteps = 2;
+  const subDt = dt / subSteps;
+
+  for (let step = 0; step < subSteps; step++) {
+    // 1. Формируем твёрдые тела (Rigid Bodies) по группам склеенных досок
+    const groupMap = new Map();
+    for (const pl of plankList) {
+      const gid = pl.groupId || `grp_${pl.id}`;
+      pl.groupId = gid;
+      if (!groupMap.has(gid)) groupMap.set(gid, []);
+      groupMap.get(gid).push(pl);
     }
 
-    // Проверка опоры о землю и другие доски снизу
-    let maxPenetration = 0;
-    for (const pl of members) {
-      const q = new THREE.Quaternion(pl.qx || 0, pl.qy || 0, pl.qz || 0, pl.qw ?? 1);
-      const hw = (pl.w || 2.4) / 2;
-      const hh = (pl.h || 0.12) / 2;
-      const hd = (pl.d || 0.36) / 2;
-      const samplePts = [
-        new THREE.Vector3(0, -hh, 0),
-        new THREE.Vector3(-hw, -hh, -hd),
-        new THREE.Vector3(hw, -hh, -hd),
-        new THREE.Vector3(-hw, -hh, hd),
-        new THREE.Vector3(hw, -hh, hd)
-      ];
-      for (const sp of samplePts) {
-        sp.applyQuaternion(q);
-        const wx = pl.x + sp.x;
-        const wy = pl.y + sp.y;
-        const wz = pl.z + sp.z;
+    const bodies = new Map();
+    for (const [gid, members] of groupMap.entries()) {
+      const isGrabbed = grabState.active && grabState.groupId === gid;
+      const com = new THREE.Vector3();
+      const vel = new THREE.Vector3();
+      const angVel = new THREE.Vector3();
+      for (const pl of members) {
+        com.add(new THREE.Vector3(pl.x, pl.y, pl.z));
+        vel.add(new THREE.Vector3(pl.vx || 0, pl.vy || 0, pl.vz || 0));
+        angVel.add(new THREE.Vector3(pl.wx || 0, pl.wy || 0, pl.wz || 0));
+      }
+      com.divideScalar(members.length);
+      vel.divideScalar(members.length);
+      angVel.divideScalar(members.length);
 
-        let supportY = getTerrainHeight(wx, wz);
-        for (const other of Object.values(state.planks)) {
-          if (other.groupId === gid) continue;
-          if (Math.abs(other.x - wx) > 2.8 || Math.abs(other.z - wz) > 2.8) continue;
-          if (other.y > pl.y + 0.08) continue;
-          const topY = getPlankBottomAndTopAt(other, wx, wz);
-          if (topY !== null && topY <= wy + 0.28 && topY > supportY) {
-            supportY = topY;
+      const mass = members.length * 1.0;
+      const invMass = isGrabbed ? 0 : 1.0 / mass;
+      // Эффективный момент инерции доски / сбитой конструкции
+      const invInertia = isGrabbed ? 0 : 1.85 / mass;
+
+      bodies.set(gid, {
+        gid,
+        members,
+        isGrabbed,
+        com,
+        vel,
+        angVel,
+        invMass,
+        invInertia
+      });
+    }
+
+    // 2. Интеграция внешних сил (гравитация + сопротивление воздуха) и перемещения
+    for (const body of bodies.values()) {
+      if (body.isGrabbed) continue;
+      body.vel.y -= 16.5 * subDt;
+      body.vel.multiplyScalar(Math.max(0, 1 - 0.35 * subDt));
+      body.angVel.multiplyScalar(Math.max(0, 1 - 0.85 * subDt));
+
+      translateBody(body, body.vel.clone().multiplyScalar(subDt));
+      applyBodyRotationDelta(body, body.angVel.clone().multiplyScalar(subDt));
+    }
+
+    // 3. Столкновение игрока с досками (игрок может толкать не закреплённые доски ногами/корпусом)
+    if (state.started) {
+      const playerCenter = new THREE.Vector3(state.x, state.y + 0.55, state.z);
+      for (const body of bodies.values()) {
+        if (body.isGrabbed) continue;
+        for (const pl of body.members) {
+          const obb = buildPlankOBB(pl);
+          const closest = clampPointToOBB(playerCenter, obb);
+          const diff = closest.clone().sub(playerCenter);
+          diff.y *= 0.5;
+          const dist = diff.length();
+          if (dist > 0.001 && dist < 0.42 && closest.y > state.y + 0.18) {
+            const pushDir = diff.normalize();
+            const pushDepth = 0.42 - dist;
+            translateBody(body, pushDir.clone().multiplyScalar(pushDepth * 0.55));
+            const r = closest.clone().sub(body.com);
+            const impulse = pushDir.clone().multiplyScalar(1.4);
+            body.vel.addScaledVector(impulse, body.invMass);
+            body.angVel.addScaledVector(new THREE.Vector3().crossVectors(r, impulse), body.invInertia);
           }
         }
+      }
+    }
 
-        if (wy < supportY) {
-          maxPenetration = Math.max(maxPenetration, supportY - wy);
+    // 4. Коллизии досок друг с другом (OBB vs OBB SAT + импульс + крутящий момент)
+    const allPlankOBBs = plankList.map((pl) => buildPlankOBB(pl));
+    for (let i = 0; i < allPlankOBBs.length; i++) {
+      for (let j = i + 1; j < allPlankOBBs.length; j++) {
+        const obbA = allPlankOBBs[i];
+        const obbB = allPlankOBBs[j];
+        if (obbA.pl.groupId === obbB.pl.groupId) continue;
+
+        const bodyA = bodies.get(obbA.pl.groupId);
+        const bodyB = bodies.get(obbB.pl.groupId);
+        if (!bodyA || !bodyB) continue;
+        if (bodyA.isGrabbed && bodyB.isGrabbed) continue;
+
+        const col = testOBBCollision(obbA, obbB);
+        if (!col) continue;
+
+        const n = col.normal;
+        const totalInvMass = bodyA.invMass + bodyB.invMass;
+        if (totalInvMass <= 0) continue;
+
+        // Позиционное разделение досок без проваливания друг в друга
+        const slop = 0.002;
+        const corrMag = Math.max(0, col.depth - slop) / totalInvMass * 0.82;
+        const corr = n.clone().multiplyScalar(corrMag);
+        if (bodyA.invMass > 0) translateBody(bodyA, corr.clone().multiplyScalar(bodyA.invMass));
+        if (bodyB.invMass > 0) translateBody(bodyB, corr.clone().multiplyScalar(-bodyB.invMass));
+
+        // Рычаги от центров масс до точки удара
+        const rA = col.point.clone().sub(bodyA.com);
+        const rB = col.point.clone().sub(bodyB.com);
+
+        // Угловой рычаг при опирании края одной доски на другую (эффект качелей/соскальзывания)
+        if (bodyA.invInertia > 0) {
+          applyBodyRotationDelta(bodyA, new THREE.Vector3().crossVectors(rA, n).multiplyScalar(col.depth * 0.35 * bodyA.invInertia));
+        }
+        if (bodyB.invInertia > 0) {
+          applyBodyRotationDelta(bodyB, new THREE.Vector3().crossVectors(rB, n.clone().negate()).multiplyScalar(col.depth * 0.35 * bodyB.invInertia));
+        }
+
+        const velAtA = bodyA.vel.clone().add(new THREE.Vector3().crossVectors(bodyA.angVel, rA));
+        const velAtB = bodyB.vel.clone().add(new THREE.Vector3().crossVectors(bodyB.angVel, rB));
+        const relVel = velAtA.sub(velAtB);
+        const vn = relVel.dot(n);
+
+        if (vn < 0) {
+          const rAxN = new THREE.Vector3().crossVectors(rA, n);
+          const rBxN = new THREE.Vector3().crossVectors(rB, n);
+          const angTerm =
+            n.dot(new THREE.Vector3().crossVectors(rAxN, rA)) * bodyA.invInertia +
+            n.dot(new THREE.Vector3().crossVectors(rBxN, rB)) * bodyB.invInertia;
+          const denom = totalInvMass + Math.max(0, angTerm);
+          const restitution = Math.abs(vn) > 1.2 ? 0.16 : 0.02;
+          const jn = (-(1 + restitution) * vn) / denom;
+          const impulseN = n.clone().multiplyScalar(jn);
+
+          if (bodyA.invMass > 0) {
+            bodyA.vel.addScaledVector(impulseN, bodyA.invMass);
+            bodyA.angVel.addScaledVector(new THREE.Vector3().crossVectors(rA, impulseN), bodyA.invInertia);
+          }
+          if (bodyB.invMass > 0) {
+            bodyB.vel.addScaledVector(impulseN, -bodyB.invMass);
+            bodyB.angVel.addScaledVector(new THREE.Vector3().crossVectors(rB, impulseN.clone().negate()), bodyB.invInertia);
+          }
+
+          // Импульс сухого трения дерева о дерево
+          const tangent = relVel.clone().addScaledVector(n, -vn);
+          if (tangent.lengthSq() > 1e-5) {
+            tangent.normalize();
+            const jtMax = jn * 0.58;
+            const jt = Math.max(-jtMax, Math.min(jtMax, -relVel.dot(tangent) / denom));
+            const impulseT = tangent.multiplyScalar(jt);
+            if (bodyA.invMass > 0) {
+              bodyA.vel.addScaledVector(impulseT, bodyA.invMass);
+              bodyA.angVel.addScaledVector(new THREE.Vector3().crossVectors(rA, impulseT), bodyA.invInertia);
+            }
+            if (bodyB.invMass > 0) {
+              bodyB.vel.addScaledVector(impulseT, -bodyB.invMass);
+              bodyB.angVel.addScaledVector(new THREE.Vector3().crossVectors(rB, impulseT.clone().negate()), bodyB.invInertia);
+            }
+          }
         }
       }
     }
 
-    if (maxPenetration > 0) {
-      for (const pl of members) {
-        pl.y = +(pl.y + maxPenetration).toFixed(3);
-        pl.vy = 0;
-        const m = plankMeshes.get(pl.id);
-        if (m) {
-          m.position.y = pl.y;
-          m.updateMatrixWorld(true);
+    // 5. Коллизия каждого угла и ребра досок с рельефом земли (с наклоном и опрокидыванием)
+    for (const body of bodies.values()) {
+      if (body.isGrabbed) continue;
+      let groundContacts = 0;
+
+      for (const pl of body.members) {
+        const obb = buildPlankOBB(pl);
+        for (const pt of obb.corners) {
+          const gY = getTerrainHeight(pt.x, pt.z);
+          const pen = gY - pt.y;
+          if (pen > 0) {
+            groundContacts++;
+            // Нормаль рельефа в точке контакта
+            const gx = getTerrainHeight(pt.x + 0.25, pt.z) - gY;
+            const gz = getTerrainHeight(pt.x, pt.z + 0.25) - gY;
+            const n = new THREE.Vector3(-gx * 4, 1, -gz * 4).normalize();
+
+            // Выталкиваем точку контакта и создаём вращающий момент относительно центра масс
+            translateBody(body, n.clone().multiplyScalar(pen * 0.52));
+            const r = pt.clone().sub(body.com);
+            applyBodyRotationDelta(body, new THREE.Vector3().crossVectors(r, n).multiplyScalar(pen * 0.48 * body.invInertia));
+
+            const velAtPt = body.vel.clone().add(new THREE.Vector3().crossVectors(body.angVel, r));
+            const vn = velAtPt.dot(n);
+            if (vn < 0) {
+              const rXn = new THREE.Vector3().crossVectors(r, n);
+              const denom = body.invMass + Math.max(0, n.dot(new THREE.Vector3().crossVectors(rXn, r)) * body.invInertia);
+              const restitution = Math.abs(vn) > 1.6 ? 0.12 : 0.0;
+              const jn = (-(1 + restitution) * vn) / denom;
+              const impN = n.clone().multiplyScalar(jn);
+              body.vel.addScaledVector(impN, body.invMass);
+              body.angVel.addScaledVector(new THREE.Vector3().crossVectors(r, impN), body.invInertia);
+
+              // Трение о траву/грунт
+              const tang = velAtPt.clone().addScaledVector(n, -vn);
+              if (tang.lengthSq() > 1e-5) {
+                tang.normalize();
+                const jt = Math.max(-jn * 0.68, Math.min(jn * 0.68, -velAtPt.dot(tang) / denom));
+                const impT = tang.multiplyScalar(jt);
+                body.vel.addScaledVector(impT, body.invMass);
+                body.angVel.addScaledVector(new THREE.Vector3().crossVectors(r, impT), body.invInertia);
+              }
+            }
+          }
         }
       }
-      if (Math.abs(dy) > 0.002) anyMoved = true;
-    } else {
-      anyMoved = true;
-      for (const pl of members) {
-        const m = plankMeshes.get(pl.id);
-        if (m) {
-          m.position.y = pl.y;
-          m.updateMatrixWorld(true);
+
+      if (groundContacts > 0) {
+        body.vel.multiplyScalar(0.86);
+        body.angVel.multiplyScalar(0.82);
+        if (body.vel.lengthSq() < 0.0025 && body.angVel.lengthSq() < 0.004) {
+          body.vel.set(0, 0, 0);
+          body.angVel.set(0, 0, 0);
         }
+      }
+    }
+
+    // 6. Записываем обновлённые скорости и координаты в доски
+    for (const body of bodies.values()) {
+      if (body.isGrabbed) continue;
+      for (const pl of body.members) {
+        pl.x = +pl.x.toFixed(4);
+        pl.y = +pl.y.toFixed(4);
+        pl.z = +pl.z.toFixed(4);
+        pl.qx = +pl.qx.toFixed(5);
+        pl.qy = +pl.qy.toFixed(5);
+        pl.qz = +pl.qz.toFixed(5);
+        pl.qw = +pl.qw.toFixed(5);
+        pl.vx = +body.vel.x.toFixed(3);
+        pl.vy = +body.vel.y.toFixed(3);
+        pl.vz = +body.vel.z.toFixed(3);
+        pl.wx = +body.angVel.x.toFixed(3);
+        pl.wy = +body.angVel.y.toFixed(3);
+        pl.wz = +body.angVel.z.toFixed(3);
       }
     }
   }
 
-  if (anyMoved) {
+  // Обновляем 3D-меши всех досок
+  for (const pl of plankList) {
+    const m = plankMeshes.get(pl.id);
+    if (m) {
+      m.position.set(pl.x, pl.y, pl.z);
+      m.quaternion.set(pl.qx || 0, pl.qy || 0, pl.qz || 0, pl.qw ?? 1);
+      m.updateMatrixWorld(true);
+    }
+  }
+
+  physicsSaveTimer += dt;
+  if (physicsSaveTimer > 0.6) {
+    physicsSaveTimer = 0;
     saveWorldPlanks();
   }
 }
@@ -2415,15 +2730,20 @@ canvas.addEventListener("mousedown", (e) => {
 window.addEventListener("mousemove", (e) => {
   if (modalBackdrop.style.display === "flex") return;
 
-  // Если игрок держит доску пустой рукой (ЛКМ) и одновременно зажал кнопку вращения (R / Q / E / ПКМ / Shift)
+  // Если игрок держит доску пустой рукой (ЛКМ) и одновременно зажал кнопку вращения (R / Q / E / ПКМ / Shift) — вращаем ТОЛЬКО мышкой
   if (grabState.active && isGrabRotationHeld()) {
     const mx = document.pointerLockElement === canvas ? e.movementX : e.clientX - lastMouseX;
     const my = document.pointerLockElement === canvas ? e.movementY : e.clientY - lastMouseY;
     lastMouseX = e.clientX;
     lastMouseY = e.clientY;
-    const qYaw = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), mx * 0.012);
-    const qPitch = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), my * 0.012);
-    grabState.deltaRot.premultiply(qYaw).premultiply(qPitch).normalize();
+    if (mx !== 0 || my !== 0) {
+      const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion).normalize();
+      const camFwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion).normalize();
+      const qYaw = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), mx * 0.011);
+      const secondAxis = keys["KeyQ"] || keys["KeyE"] ? camFwd : camRight;
+      const qTilt = new THREE.Quaternion().setFromAxisAngle(secondAxis, my * 0.011);
+      grabState.deltaRot.premultiply(qYaw).premultiply(qTilt).normalize();
+    }
     return;
   }
 
@@ -2845,7 +3165,19 @@ function animate(now) {
     state.vy -= 19.5 * dt;
     state.y += state.vy * dt;
 
-    const groundY = getTerrainHeight(state.x, state.z);
+    let groundY = getTerrainHeight(state.x, state.z);
+    for (const pl of Object.values(state.planks)) {
+      if (Math.abs(pl.x - state.x) > 2.6 || Math.abs(pl.z - state.z) > 2.6) continue;
+      const m = plankMeshes.get(pl.id);
+      if (!m) continue;
+      const loc = m.worldToLocal(new THREE.Vector3(state.x, pl.y, state.z));
+      if (Math.abs(loc.x) <= (pl.w || 2.4) / 2 + 0.18 && Math.abs(loc.z) <= (pl.d || 0.36) / 2 + 0.18) {
+        const topWorld = new THREE.Vector3(loc.x, (pl.h || 0.12) / 2, loc.z).applyMatrix4(m.matrixWorld);
+        if (topWorld.y <= state.y + 0.35 && topWorld.y > groundY) {
+          groundY = topWorld.y;
+        }
+      }
+    }
     if (state.y <= groundY) {
       state.y = groundY;
       state.vy = 0;
