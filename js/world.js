@@ -45,11 +45,18 @@ export function getTerrainHeight(x, z) {
   const lz = z - centerZ;
 
   // В зоне дачных участков рельеф меняется плавно, чтобы дома стояли реалистично
-  if (Math.abs(lx) < 92 && Math.abs(lz) < 82) {
+  const ax = Math.abs(lx);
+  const az = Math.abs(lz);
+  if (ax < 112 && az < 102) {
     const baseChunkH =
       Math.sin(centerX * 0.013 + 0.7) * Math.cos(centerZ * 0.013 - 0.4) * 2.5 +
       Math.sin((centerX + centerZ) * 0.022) * 1.1;
-    raw = baseChunkH + (raw - baseChunkH) * 0.35;
+    const tx = ax <= 88 ? 0 : Math.min(1, (ax - 88) / 24);
+    const tz = az <= 78 ? 0 : Math.min(1, (az - 78) / 24);
+    const blend = Math.max(tx, tz);
+    const smoothBlend = blend * blend * (3 - 2 * blend);
+    const flatFactor = 0.03 + 0.97 * smoothBlend;
+    raw = baseChunkH + (raw - baseChunkH) * flatFactor;
   }
 
   return raw;
