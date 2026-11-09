@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { Peer } from "peerjs";
 import mqtt from "mqtt";
 import { generateSecretKey, finalizeEvent } from "nostr-tools/pure";
-import { CHUNK_SIZE, getTerrainHeight, getChunkLayout } from "./world.js?v=12";
+import { CHUNK_SIZE, getTerrainHeight, getChunkLayout } from "./world.js?v=13";
 import {
   ITEMS,
   CROPS,
@@ -11,7 +11,7 @@ import {
   SHOP_GOODS,
   BAZAAR_PRICES,
   playSfx
-} from "./data.js?v=12";
+} from "./data.js?v=13";
 import {
   createTerrainChunkMesh,
   createResourceMesh,
@@ -28,7 +28,7 @@ import {
   rebuildPlankNailsMesh,
   createSingleNailMesh,
   animatePlayerMesh
-} from "./models.js?v=12";
+} from "./models.js?v=13";
 
 const savedProfile = JSON.parse(localStorage.getItem("project_dacha3_profile_v1") || "null");
 
@@ -1913,7 +1913,60 @@ function placeNailAtCrosshairAction() {
   broadcastNetworkPacket({ type: "plank_updated", plank }, true);
 }
 
-// Выравнивание двух пересекающихся досок параллельно друг другу относительно шляпки гвоздя и склеивание
+// Находит ближайшую ортогональную (под 90° или 0°/180°) ориентацию доски A относительно осей доски B
+function computeSnappedOrthogonalQuaternion(qA, qB) {
+  const axesA = [
+    new THREE.Vector3(1, 0, 0).applyQuaternion(qA).normalize(),
+    new THREE.Vector3(0, 1, 0).applyQuaternion(qA).normalize(),
+    new THREE.Vector3(0, 0, 1).applyQuaternion(qA).normalize()
+  ];
+  const axesB = [
+    new THREE.Vector3(1, 0, 0).applyQuaternion(qB).normalize(),
+    new THREE.Vector3(0, 1, 0).applyQuaternion(qB).normalize(),
+    new THREE.Vector3(0, 0, 1).applyQuaternion(qB).normalize()
+  ];
+
+  // Перебираем все 24 правые ортогональные ориентации куба относительно доски B и выбираем ближайшую к текущему повороту доски A
+  const perms = [
+    [0, 1, 2],
+    [0, 2, 1],
+    [1, 0, 2],
+    [1, 2, 0],
+    [2, 0, 1],
+    [2, 1, 0]
+  ];
+  let bestScore = -Infinity;
+  let bestMat = null;
+
+  for (const [i0, i1, i2] of perms) {
+    for (const s0 of [-1, 1]) {
+      for (const s1 of [-1, 1]) {
+        for (const s2 of [-1, 1]) {
+          const v0 = axesB[i0].clone().multiplyScalar(s0);
+          const v1 = axesB[i1].clone().multiplyScalar(s1);
+          const v2 = axesB[i2].clone().multiplyScalar(s2);
+          // Проверка правой тройки векторов (det = +1)
+          const cross01 = new THREE.Vector3().crossVectors(v0, v1);
+          if (cross01.dot(v2) < 0.9) continue;
+
+          const score = v0.dot(axesA[0]) + v1.dot(axesA[1]) + v2.dot(axesA[2]);
+          if (score > bestScore) {
+            bestScore = score;
+            const m = new THREE.Matrix4().makeBasis(v0, v1, v2);
+            bestMat = m;
+          }
+        }
+      }
+    }
+  }
+
+  const outQ = new THREE.Quaternion();
+  if (bestMat) outQ.setFromRotationMatrix(bestMat).normalize();
+  else outQ.copy(qA);
+  return outQ;
+}
+
+// Выравнивание и прибивание досок (сверху внахлёст, с боковых частей, в торец и под прямым углом 90°) без багов и проваливаний
 function checkAndWeldOverlappingPlanksAtNail(plankA, nail) {
   const meshA = plankMeshes.get(plankA.id);
   if (!meshA) return false;
@@ -1924,30 +1977,43 @@ function checkAndWeldOverlappingPlanksAtNail(plankA, nail) {
     .transformDirection(meshA.matrixWorld)
     .normalize();
 
-  // Ищем вторую доску в месте пересечения со стержнем гвоздя
+  // Является ли гвоздь забитым с боковой части / торца доски A
+  const isSideNailOnA = Math.abs(nail.nx || 0) > 0.5 || Math.abs(nail.nz || 0) > 0.5;
+
+  // Ищем вторую доску B в месте пересечения со стержнем гвоздя или вплотную к боковой грани около гвоздя
   let targetPlankB = null;
-  let bestDist = Infinity;
+  let bestScore = Infinity;
 
   for (const plankB of Object.values(state.planks)) {
     if (plankB.id === plankA.id) continue;
+    if (plankB.groupId && plankB.groupId === plankA.groupId) continue;
     const meshB = plankMeshes.get(plankB.id);
     if (!meshB) continue;
     meshB.updateMatrixWorld(true);
 
-    // Проверяем точки вдоль стержня гвоздя (под шляпкой и сквозь обе доски)
-    for (const t of [-0.08, 0.0, 0.06, 0.12, 0.18, 0.25, 0.32]) {
+    // 1. Точки вдоль оси забивания гвоздя
+    for (const t of [-0.12, -0.04, 0.0, 0.06, 0.14, 0.22, 0.32, 0.42]) {
       const sampleWorld = nailWorldPos.clone().addScaledVector(nailNormalWorld, -t);
-      const localInB = meshB.worldToLocal(sampleWorld);
-      const insideX = Math.abs(localInB.x) <= (plankB.w || 2.4) / 2 + 0.16;
-      const insideY = Math.abs(localInB.y) <= (plankB.h || 0.12) / 2 + 0.24;
-      const insideZ = Math.abs(localInB.z) <= (plankB.d || 0.36) / 2 + 0.16;
-      if (insideX && insideY && insideZ) {
-        const d = Math.abs(localInB.y);
-        if (d < bestDist) {
-          bestDist = d;
-          targetPlankB = plankB;
-        }
+      const localInB = meshB.worldToLocal(sampleWorld.clone());
+      const dx = Math.max(0, Math.abs(localInB.x) - (plankB.w || 2.4) / 2);
+      const dy = Math.max(0, Math.abs(localInB.y) - (plankB.h || 0.12) / 2);
+      const dz = Math.max(0, Math.abs(localInB.z) - (plankB.d || 0.36) / 2);
+      const distOut = Math.hypot(dx, dy, dz);
+      if (distOut <= 0.32 && distOut < bestScore) {
+        bestScore = distOut;
+        targetPlankB = plankB;
       }
+    }
+
+    // 2. Также проверяем случай, когда гвоздь забит около бокового стыка двух досок
+    const nailInB = meshB.worldToLocal(nailWorldPos.clone());
+    const bx = Math.max(0, Math.abs(nailInB.x) - (plankB.w || 2.4) / 2);
+    const by = Math.max(0, Math.abs(nailInB.y) - (plankB.h || 0.12) / 2);
+    const bz = Math.max(0, Math.abs(nailInB.z) - (plankB.d || 0.36) / 2);
+    const bDist = Math.hypot(bx, by, bz);
+    if (bDist <= 0.40 && bDist < bestScore) {
+      bestScore = bDist;
+      targetPlankB = plankB;
     }
   }
 
@@ -1956,52 +2022,116 @@ function checkAndWeldOverlappingPlanksAtNail(plankA, nail) {
   const meshB = plankMeshes.get(targetPlankB.id);
   meshB.updateMatrixWorld(true);
 
-  // Определяем плоскость выравнивания параллельно друг другу относительно шляпки гвоздя:
-  const qA = new THREE.Quaternion(plankA.qx || 0, plankA.qy || 0, plankA.qz || 0, plankA.qw ?? 1);
-  const qB = new THREE.Quaternion(targetPlankB.qx || 0, targetPlankB.qy || 0, targetPlankB.qz || 0, targetPlankB.qw ?? 1);
+  const qA = new THREE.Quaternion(plankA.qx || 0, plankA.qy || 0, plankA.qz || 0, plankA.qw ?? 1).normalize();
+  const qB = new THREE.Quaternion(targetPlankB.qx || 0, targetPlankB.qy || 0, targetPlankB.qz || 0, targetPlankB.qw ?? 1).normalize();
 
-  const upB = new THREE.Vector3(0, 1, 0).applyQuaternion(qB).normalize();
-  const refNormal = upB.dot(nailNormalWorld) >= 0 ? upB.clone() : upB.clone().negate();
+  // Вычисляем точный ортогональный поворот (0° параллельно или 90° прямой угол по всем осям относительно доски B)
+  const snappedQA = computeSnappedOrthogonalQuaternion(qA, qB);
+  const deltaQuat = snappedQA.clone().multiply(qA.clone().invert()).normalize();
 
-  // Вращаем доску A (и привязанные к ней доски) вокруг точки шляпки гвоздя так,
-  // чтобы нормаль под шляпкой гвоздя совпала с нормалью доски B -> обе доски становятся строго параллельны!
-  const alignQuat = new THREE.Quaternion().setFromUnitVectors(nailNormalWorld, refNormal);
-
-  const oldGroupA = plankA.groupId;
+  const oldGroupA = plankA.groupId || `grp_${plankA.id}`;
   const newGroupId = targetPlankB.groupId || `grp_${targetPlankB.id}`;
   targetPlankB.groupId = newGroupId;
 
-  const groupAMembers = Object.values(state.planks).filter((p) => p.groupId === oldGroupA);
+  const groupAMembers = Object.values(state.planks).filter((p) => (p.groupId || `grp_${p.id}`) === oldGroupA);
+
+  // Поворачиваем доску A (и прикреплённые к ней доски) вокруг точки гвоздя в точный прямой/параллельный угол
   for (const mPlank of groupAMembers) {
-    const mQuat = new THREE.Quaternion(mPlank.qx || 0, mPlank.qy || 0, mPlank.qz || 0, mPlank.qw ?? 1);
-    mQuat.premultiply(alignQuat).normalize();
+    const mQuat = new THREE.Quaternion(mPlank.qx || 0, mPlank.qy || 0, mPlank.qz || 0, mPlank.qw ?? 1).normalize();
+    mQuat.premultiply(deltaQuat).normalize();
     mPlank.qx = +mQuat.x.toFixed(5);
     mPlank.qy = +mQuat.y.toFixed(5);
     mPlank.qz = +mQuat.z.toFixed(5);
     mPlank.qw = +mQuat.w.toFixed(5);
 
     const relPos = new THREE.Vector3(mPlank.x, mPlank.y, mPlank.z).sub(nailWorldPos);
-    relPos.applyQuaternion(alignQuat);
+    relPos.applyQuaternion(deltaQuat);
     const newPos = nailWorldPos.clone().add(relPos);
-    mPlank.x = +newPos.x.toFixed(3);
-    mPlank.y = +newPos.y.toFixed(3);
-    mPlank.z = +newPos.z.toFixed(3);
+    mPlank.x = +newPos.x.toFixed(4);
+    mPlank.y = +newPos.y.toFixed(4);
+    mPlank.z = +newPos.z.toFixed(4);
   }
 
-  // Плотно прижимаем параллельные доски друг к другу под шляпкой гвоздя без зазора
-  const centerB = new THREE.Vector3(targetPlankB.x, targetPlankB.y, targetPlankB.z);
-  const centerA = new THREE.Vector3(plankA.x, plankA.y, plankA.z);
-  const currentSep = centerA.clone().sub(centerB).dot(refNormal);
-  const desiredSep = ((plankA.h || 0.12) + (targetPlankB.h || 0.12)) / 2;
-  const shiftAlongNormal = desiredSep - currentSep;
+  // Вычисляем полуразмеры доски A и доски B в локальной системе координат доски B
+  const invQB = qB.clone().invert();
+  const relQAInB = invQB.clone().multiply(snappedQA).normalize();
+  const axA0 = new THREE.Vector3(1, 0, 0).applyQuaternion(relQAInB);
+  const axA1 = new THREE.Vector3(0, 1, 0).applyQuaternion(relQAInB);
+  const axA2 = new THREE.Vector3(0, 0, 1).applyQuaternion(relQAInB);
+  const eA0 = (plankA.w || 2.4) / 2;
+  const eA1 = (plankA.h || 0.12) / 2;
+  const eA2 = (plankA.d || 0.36) / 2;
+
+  const halfAInB = {
+    x: Math.abs(axA0.x) * eA0 + Math.abs(axA1.x) * eA1 + Math.abs(axA2.x) * eA2,
+    y: Math.abs(axA0.y) * eA0 + Math.abs(axA1.y) * eA1 + Math.abs(axA2.y) * eA2,
+    z: Math.abs(axA0.z) * eA0 + Math.abs(axA1.z) * eA1 + Math.abs(axA2.z) * eA2
+  };
+  const halfB = {
+    x: (targetPlankB.w || 2.4) / 2,
+    y: (targetPlankB.h || 0.12) / 2,
+    z: (targetPlankB.d || 0.36) / 2
+  };
+
+  // Координаты центра доски A в локальной системе доски B
+  const centerBWorld = new THREE.Vector3(targetPlankB.x, targetPlankB.y, targetPlankB.z);
+  const centerAWorld = new THREE.Vector3(plankA.x, plankA.y, plankA.z);
+  const localCenterA = centerAWorld.clone().sub(centerBWorld).applyQuaternion(invQB);
+
+  // Определяем, с какой стороны доски B прибивается доска A:
+  // с боковой грани (Z), с торца (X) или сверху/снизу (Y)
+  const penX = halfB.x + halfAInB.x - Math.abs(localCenterA.x);
+  const penY = halfB.y + halfAInB.y - Math.abs(localCenterA.y);
+  const penZ = halfB.z + halfAInB.z - Math.abs(localCenterA.z);
+
+  const targetLocalA = localCenterA.clone();
+
+  // Если доска прибивается с боковой части доски B (или гвоздь забит сбоку)
+  const isAttachedToSideZ =
+    Math.abs(localCenterA.z) >= halfB.z - 0.04 ||
+    (isSideNailOnA && penZ <= penX && Math.abs(localCenterA.z) > 0.12);
+  const isAttachedToEndX =
+    Math.abs(localCenterA.x) >= halfB.x - 0.04 ||
+    (isSideNailOnA && penX < penZ && Math.abs(localCenterA.x) > halfB.x * 0.65);
+
+  if (isAttachedToSideZ && !isAttachedToEndX) {
+    // Прибивание вплотную к боковой грани доски B (без запрыгивания наверх и без пересечения!)
+    const signZ = localCenterA.z >= 0 ? 1 : -1;
+    targetLocalA.z = signZ * (halfB.z + halfAInB.z);
+    // Выравниваем по высоте заподлицо с нижней/верхней гранью доски B
+    if (Math.abs(halfAInB.y - halfB.y) < 0.02) {
+      targetLocalA.y = 0; // обе доски лежат в одной плоскости
+    } else {
+      targetLocalA.y = halfAInB.y - halfB.y; // вертикальная доска стоит заподлицо с основанием доски B
+    }
+  } else if (isAttachedToEndX) {
+    // Прибивание вплотную к торцу доски B
+    const signX = localCenterA.x >= 0 ? 1 : -1;
+    targetLocalA.x = signX * (halfB.x + halfAInB.x);
+    if (Math.abs(halfAInB.y - halfB.y) < 0.02) {
+      targetLocalA.y = 0;
+    } else {
+      targetLocalA.y = halfAInB.y - halfB.y;
+    }
+  } else {
+    // Прибивание сверху/снизу на пласть доски B (параллельно или крест-накрест под 90° или стоя вертикально сверху)
+    const signY = localCenterA.y >= -0.02 ? 1 : -1;
+    targetLocalA.y = signY * (halfB.y + halfAInB.y);
+  }
+
+  const localShift = targetLocalA.sub(localCenterA);
+  const worldShift = localShift.applyQuaternion(qB);
 
   for (const mPlank of groupAMembers) {
-    mPlank.x = +(mPlank.x + refNormal.x * shiftAlongNormal).toFixed(3);
-    mPlank.y = +(mPlank.y + refNormal.y * shiftAlongNormal).toFixed(3);
-    mPlank.z = +(mPlank.z + refNormal.z * shiftAlongNormal).toFixed(3);
+    mPlank.x = +(mPlank.x + worldShift.x).toFixed(4);
+    mPlank.y = +(mPlank.y + worldShift.y).toFixed(4);
+    mPlank.z = +(mPlank.z + worldShift.z).toFixed(4);
     mPlank.vx = 0;
     mPlank.vy = 0;
     mPlank.vz = 0;
+    mPlank.wx = 0;
+    mPlank.wy = 0;
+    mPlank.wz = 0;
     mPlank.groupId = newGroupId;
     spawnOrUpdatePlankMesh(mPlank);
   }
@@ -2009,6 +2139,9 @@ function checkAndWeldOverlappingPlanksAtNail(plankA, nail) {
   targetPlankB.vx = 0;
   targetPlankB.vy = 0;
   targetPlankB.vz = 0;
+  targetPlankB.wx = 0;
+  targetPlankB.wy = 0;
+  targetPlankB.wz = 0;
   nail.weldedToPlankId = targetPlankB.id;
   spawnOrUpdatePlankMesh(targetPlankB);
 
@@ -2562,10 +2695,11 @@ function stepPlanksPhysics(dt) {
             const gz = getTerrainHeight(pt.x, pt.z + 0.25) - gY;
             const n = new THREE.Vector3(-gx * 4, 1, -gz * 4).normalize();
 
-            // Выталкиваем точку контакта и создаём вращающий момент относительно центра масс
-            translateBody(body, n.clone().multiplyScalar(pen * 0.52));
+            // Выталкиваем точку контакта и создаём вращающий момент (для сбитых конструкций гасим паразитный крен на земле)
+            translateBody(body, n.clone().multiplyScalar(pen * 0.65));
             const r = pt.clone().sub(body.com);
-            applyBodyRotationDelta(body, new THREE.Vector3().crossVectors(r, n).multiplyScalar(pen * 0.48 * body.invInertia));
+            const torqueScale = body.members.length > 1 ? 0.06 : 0.45;
+            applyBodyRotationDelta(body, new THREE.Vector3().crossVectors(r, n).multiplyScalar(pen * torqueScale * body.invInertia));
 
             const velAtPt = body.vel.clone().add(new THREE.Vector3().crossVectors(body.angVel, r));
             const vn = velAtPt.dot(n);
