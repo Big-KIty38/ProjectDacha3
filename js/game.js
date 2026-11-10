@@ -362,8 +362,23 @@ const sessionSk = generateSecretKey();
 let peerInstance = null;
 let myPeerId = "";
 const peerConnections = new Map();
+const peerLastPosSentAt = new Map();
 let lastNtfyPosSentAt = 0;
+let lastNostrPosSentAt = 0;
+let pendingWorldSyncTimer = null;
+const MAX_DIRECT_PEERS = 28;
 
+// Авто-выбор хоста синхронизации (лидера комнаты) среди онлайн-игроков
+function isLocalPlayerSyncLeader() {
+  let minKey = state.playerKey;
+  const now = Date.now();
+  for (const [pid, rp] of state.remotePlayers.entries()) {
+    if (now - rp.lastSeen < 6000 && pid < minKey) {
+      minKey = pid;
+    }
+  }
+  return minKey === state.playerKey;
+}
 
 function removeRemotePlayer(pid) {
   const rp = state.remotePlayers.get(pid);
@@ -407,6 +422,8 @@ function updateNetBadge() {
 
 function connectToPeer(remotePeerId) {
   if (!peerInstance || !remotePeerId || remotePeerId === myPeerId || peerConnections.has(remotePeerId)) return;
+  const maxPeers = isLocalPlayerSyncLeader() ? 64 : MAX_DIRECT_PEERS;
+  if (peerConnections.size >= maxPeers) return;
   try {
     const conn = peerInstance.connect(remotePeerId, { reliable: false });
     setupPeerConnection(conn);
@@ -420,15 +437,17 @@ function setupPeerConnection(conn) {
     updateNetBadge();
     if (state.started) {
       conn.send(buildPresencePacket("player_joined"));
-      conn.send({
-        type: "world_sync_snapshot",
-        pktId: `${state.playerKey}_snap_${Date.now()}`,
-        senderKey: state.playerKey,
-        plots: state.plots,
-        plankSystemV9: true,
-        structures: {},
-        harvested: state.harvested
-      });
+      // Отправляем слепок мира точечно новому пиру (unicast), не засоряя общий эфир
+      if (Object.keys(state.plots).length > 0 || Object.keys(state.planks).length > 0) {
+        conn.send({
+          type: "world_sync_snapshot",
+          pktId: `${state.playerKey}_snap_${Date.now()}`,
+          senderKey: state.playerKey,
+          plots: state.plots,
+          planks: state.planks,
+          harvested: state.harvested
+        });
+      }
     }
   });
   conn.on("data", (data) => {
@@ -440,6 +459,7 @@ function setupPeerConnection(conn) {
   });
   conn.on("close", () => {
     peerConnections.delete(conn.peer);
+    peerLastPosSentAt.delete(conn.peer);
     for (const [pid, rp] of state.remotePlayers.entries()) {
       if (rp.peerId === conn.peer) removeRemotePlayer(pid);
     }
@@ -447,6 +467,7 @@ function setupPeerConnection(conn) {
   });
   conn.on("error", () => {
     peerConnections.delete(conn.peer);
+    peerLastPosSentAt.delete(conn.peer);
   });
 }
 
@@ -474,35 +495,56 @@ function broadcastNetworkPacket(payload, isWorldState = false) {
   const fullPkt = { ...payload, pktId, senderKey: state.playerKey, peerId: myPeerId, sentAt: Date.now() };
   seenPackets.add(pktId);
   const rawJson = JSON.stringify(fullPkt);
+  const now = Date.now();
+  const isMovePkt = fullPkt.type === "player_moved";
 
   // 1. Локальные вкладки браузера
   if (bcChannel) {
     try { bcChannel.postMessage(fullPkt); } catch {}
   }
 
-  // 2. Прямые WebRTC-соединения PeerJS между всеми игроками (мгновенно, без лимитов)
-  for (const conn of peerConnections.values()) {
-    if (conn.open) {
-      try { conn.send(fullPkt); } catch {}
+  // 2. Прямые WebRTC-соединения PeerJS с приоритизацией по дистанции (Interest Management для 50+ игроков)
+  for (const [peerId, conn] of peerConnections.entries()) {
+    if (!conn.open) continue;
+    if (isMovePkt) {
+      let distSq = 0;
+      for (const rp of state.remotePlayers.values()) {
+        if (rp.peerId === peerId) {
+          const dx = rp.x - state.x;
+          const dz = rp.z - state.z;
+          distSq = dx * dx + dz * dz;
+          break;
+        }
+      }
+      // Игрокам рядом (< 130м) шлём каждый тик, далёким — раз в 750 мс для экономии канала
+      if (distSq > 130 * 130) {
+        const lastSent = peerLastPosSentAt.get(peerId) || 0;
+        if (now - lastSent < 750) continue;
+      }
+      peerLastPosSentAt.set(peerId, now);
     }
+    try { conn.send(fullPkt); } catch {}
   }
 
-  // 3. Брокеры MQTT (работают и с VPN, и без VPN)
+  // 3. Брокеры MQTT: для частых координат шлём только в 1 активный брокер (убирает 3-кратный дубляж трафика!)
   for (const mc of mqttClients) {
     if (mc.connected) {
       try {
         mc.publish(`${CENTRAL_ROOM_TOPIC}/live`, rawJson, { qos: isWorldState ? 1 : 0, retain: isWorldState });
+        if (isMovePkt) break; // Одного брокера достаточно для координат
       } catch {}
     }
   }
 
-  // 4. Глобальные Nostr-релеи (отлично работают через любой VPN без лимитов IP)
-  if (nostrSockets.some((w) => w.readyState === WebSocket.OPEN)) {
+  // 4. Глобальные Nostr-релеи (для мировых событий сразу, для координат — с антиспам-интервалом)
+  const shouldSendNostr = !isMovePkt || now - lastNostrPosSentAt > 1100;
+  if (shouldSendNostr && nostrSockets.some((w) => w.readyState === WebSocket.OPEN)) {
+    if (isMovePkt) lastNostrPosSentAt = now;
     try {
       const ev = finalizeEvent(
         {
           kind: 1,
-          created_at: Math.floor(Date.now() / 1000),
+          created_at: Math.floor(now / 1000),
           tags: [["t", CENTRAL_ROOM_TOPIC]],
           content: rawJson
         },
@@ -510,21 +552,24 @@ function broadcastNetworkPacket(payload, isWorldState = false) {
       );
       const frame = JSON.stringify(["EVENT", ev]);
       for (const ws of nostrSockets) {
-        if (ws.readyState === WebSocket.OPEN) ws.send(frame);
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(frame);
+          if (isMovePkt) break;
+        }
       }
     } catch {}
   }
 
-  // 4. Центральный сервер ntfy.sh (хранит историю всех покупок участков, построек, чата и входов 12 часов!)
-  const now = Date.now();
+  // 5. Центральный сервер ntfy.sh (хранит историю построек и покупок 12 часов; бережём лимиты при большом онлайне)
+  const ntfyMoveInterval = Math.max(6000, state.remotePlayers.size * 650);
   const shouldPostNtfy =
     isWorldState ||
     fullPkt.type === "player_joined" ||
     fullPkt.type === "request_world_sync" ||
-    (fullPkt.type === "player_moved" && now - lastNtfyPosSentAt > 3500);
+    (isMovePkt && now - lastNtfyPosSentAt > ntfyMoveInterval);
 
   if (shouldPostNtfy) {
-    if (fullPkt.type === "player_moved") lastNtfyPosSentAt = now;
+    if (isMovePkt) lastNtfyPosSentAt = now;
     fetch(NTFY_HTTP_URL, {
       method: "POST",
       body: rawJson
@@ -532,18 +577,47 @@ function broadcastNetworkPacket(payload, isWorldState = false) {
   }
 }
 
-function sendMyPresenceAndWorldSnapshot() {
+function sendMyPresenceAndWorldSnapshot(targetPeerId = "") {
   if (!state.started) return;
   broadcastNetworkPacket(buildPresencePacket("player_joined"), false);
 
-  if (Object.keys(state.plots).length > 0 || Object.keys(state.planks).length > 0) {
-    broadcastNetworkPacket({
-      type: "world_sync_snapshot",
-      plots: state.plots,
-      planks: state.planks,
-      harvested: state.harvested
-    }, true);
+  if (Object.keys(state.plots).length === 0 && Object.keys(state.planks).length === 0) return;
+
+  const snapPkt = {
+    type: "world_sync_snapshot",
+    pktId: `${state.playerKey}_snap_${Date.now()}`,
+    senderKey: state.playerKey,
+    plots: state.plots,
+    planks: state.planks,
+    harvested: state.harvested
+  };
+
+  // Если есть прямое P2P-соединение с запросившим игроком — отдаём слепок мира напрямую ему
+  if (targetPeerId && peerConnections.has(targetPeerId)) {
+    const conn = peerConnections.get(targetPeerId);
+    if (conn && conn.open) {
+      try {
+        conn.send(snapPkt);
+        return;
+      } catch {}
+    }
   }
+
+  broadcastNetworkPacket(snapPkt, true);
+}
+
+function scheduleLeaderWorldSync(targetPeerId = "") {
+  if (Date.now() - lastWorldSyncReplyAt < 1800) return;
+  if (pendingWorldSyncTimer) clearTimeout(pendingWorldSyncTimer);
+  // Лидер комнаты отвечает через 120 мс, резервный игрок — через 650 мс (только если никто ещё не ответил)
+  const isLeader = isLocalPlayerSyncLeader();
+  const delay = isLeader ? 120 + Math.random() * 120 : 650 + Math.random() * 450;
+  pendingWorldSyncTimer = setTimeout(() => {
+    pendingWorldSyncTimer = null;
+    if (Date.now() - lastWorldSyncReplyAt < 1500) return;
+    lastWorldSyncReplyAt = Date.now();
+    sendMyPresenceAndWorldSnapshot(targetPeerId);
+  }, delay);
 }
 
 function mergeWorldSnapshot(pkt) {
@@ -603,13 +677,16 @@ function handleIncomingPacket(pkt) {
 
   switch (pkt.type) {
     case "request_world_sync": {
-      if (Date.now() - lastWorldSyncReplyAt > 1500) {
-        lastWorldSyncReplyAt = Date.now();
-        setTimeout(() => sendMyPresenceAndWorldSnapshot(), 150 + Math.random() * 300);
-      }
+      scheduleLeaderWorldSync(pkt.peerId || "");
       break;
     }
     case "world_sync_snapshot": {
+      // Если другой игрок уже разослал слепок мира — отменяем дублирующую отправку
+      lastWorldSyncReplyAt = Date.now();
+      if (pendingWorldSyncTimer) {
+        clearTimeout(pendingWorldSyncTimer);
+        pendingWorldSyncTimer = null;
+      }
       mergeWorldSnapshot(pkt);
       break;
     }
@@ -666,9 +743,8 @@ function handleIncomingPacket(pkt) {
         rp.lastSeen = Date.now();
       }
 
-      if ((pkt.type === "player_joined" || isNewPlayer) && Date.now() - lastWorldSyncReplyAt > 1500) {
-        lastWorldSyncReplyAt = Date.now();
-        setTimeout(() => sendMyPresenceAndWorldSnapshot(), 150 + Math.random() * 250);
+      if (pkt.type === "player_joined" || isNewPlayer) {
+        scheduleLeaderWorldSync(pkt.peerId || "");
       }
       break;
     }
@@ -2626,10 +2702,23 @@ function stepPlanksPhysics(dt) {
     }
     const invInertia = isGrabbed ? 0 : 1.0 / Math.max(0.45, totalInertia);
 
+    // Засыпание покоящихся построек и отсечка далёких объектов (> 110м) для стабильных 60 FPS при 50+ игроках
+    const distSqToPlayer = state.started
+      ? (com.x - state.x) * (com.x - state.x) + (com.z - state.z) * (com.z - state.z)
+      : 0;
+    const allResting =
+      !isGrabbed &&
+      members.every((pl) => pl.resting) &&
+      vel.lengthSq() < 1e-5 &&
+      angVel.lengthSq() < 1e-5 &&
+      distSqToPlayer > 18.0;
+    const isFarInactive = !isGrabbed && distSqToPlayer > 110 * 110;
+
     bodies.set(gid, {
       gid,
       members,
       isGrabbed,
+      isSleeping: allResting || isFarInactive,
       com,
       vel,
       angVel,
@@ -2638,10 +2727,22 @@ function stepPlanksPhysics(dt) {
     });
   }
 
+  // Пробуждаем спящие доски, если рядом с ними падает или движется активная доска
+  for (const bodyA of bodies.values()) {
+    if (bodyA.isSleeping) continue;
+    for (const bodyB of bodies.values()) {
+      if (!bodyB.isSleeping) continue;
+      if (bodyA.com.distanceToSquared(bodyB.com) < 28.0) {
+        bodyB.isSleeping = false;
+        for (const pl of bodyB.members) pl.resting = false;
+      }
+    }
+  }
+
   for (let step = 0; step < subSteps; step++) {
     // 2. Интеграция внешних сил (гравитация + плавное затухание) и перемещения
     for (const body of bodies.values()) {
-      if (body.isGrabbed) continue;
+      if (body.isGrabbed || body.isSleeping) continue;
       body.vel.y -= 16.5 * subDt;
       body.vel.multiplyScalar(Math.max(0, 1 - 0.55 * subDt));
       body.angVel.multiplyScalar(Math.max(0, 1 - 1.35 * subDt));
@@ -2684,7 +2785,9 @@ function stepPlanksPhysics(dt) {
         const bodyA = bodies.get(plA.groupId);
         const bodyB = bodies.get(plB.groupId);
         if (!bodyA || !bodyB) continue;
-        if (bodyA.isGrabbed && bodyB.isGrabbed) continue;
+        if ((bodyA.isGrabbed || bodyA.isSleeping) && (bodyB.isGrabbed || bodyB.isSleeping)) continue;
+        if (bodyA.isSleeping) { bodyA.isSleeping = false; for (const p of bodyA.members) p.resting = false; }
+        if (bodyB.isSleeping) { bodyB.isSleeping = false; for (const p of bodyB.members) p.resting = false; }
 
         // Быстрая отсечка по расстоянию до построения OBB
         const dx = plA.x - plB.x;
@@ -2772,7 +2875,7 @@ function stepPlanksPhysics(dt) {
 
     // 5. Итеративный солвер контакта с землёй (NGS по позиции + Sequential Impulses по скорости без отскоков и качелей)
     for (const body of bodies.values()) {
-      if (body.isGrabbed) continue;
+      if (body.isGrabbed || body.isSleeping) continue;
 
       // 5a. Позиционный NGS-солвер с пересчётом вершин на лету (исключает перелёт и подпрыгивание)
       for (let posIter = 0; posIter < 3; posIter++) {
@@ -2861,6 +2964,9 @@ function stepPlanksPhysics(dt) {
         if (contacts.length >= 3 && body.vel.lengthSq() < 0.006 && body.angVel.lengthSq() < 0.01) {
           body.vel.set(0, 0, 0);
           body.angVel.set(0, 0, 0);
+          for (const pl of body.members) pl.resting = true;
+        } else {
+          for (const pl of body.members) pl.resting = false;
         }
       }
     }
@@ -2868,7 +2974,7 @@ function stepPlanksPhysics(dt) {
 
   // 6. Записываем обновлённые скорости и координаты в доски один раз после всех подшагов
   for (const body of bodies.values()) {
-    if (body.isGrabbed) continue;
+    if (body.isGrabbed || body.isSleeping) continue;
     for (const pl of body.members) {
       pl.x = +pl.x.toFixed(4);
       pl.y = +pl.y.toFixed(4);
@@ -3469,10 +3575,14 @@ function animate(now) {
     const dist = Math.hypot(dx, dz);
     rp.x += dx * Math.min(1, dt * 10);
     rp.z += dz * Math.min(1, dt * 10);
-    rp.y = getTerrainHeight(rp.x, rp.z);
-    rp.mesh.position.set(rp.x, rp.y, rp.z);
-    rp.mesh.rotation.y = rp.ry;
-    animatePlayerMesh(rp.mesh, dt, elapsedSec, dist > 0.05, rp.anim === "work");
+    const distSqToMe = (rp.x - state.x) * (rp.x - state.x) + (rp.z - state.z) * (rp.z - state.z);
+    rp.mesh.visible = distSqToMe < 185 * 185;
+    if (rp.mesh.visible) {
+      rp.y = getTerrainHeight(rp.x, rp.z);
+      rp.mesh.position.set(rp.x, rp.y, rp.z);
+      rp.mesh.rotation.y = rp.ry;
+      animatePlayerMesh(rp.mesh, dt, elapsedSec, dist > 0.05, rp.anim === "work");
+    }
   }
 
   for (const ch of loadedChunks.values()) {
