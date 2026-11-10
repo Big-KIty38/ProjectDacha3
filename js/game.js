@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { Peer } from "peerjs";
 import mqtt from "mqtt";
 import { generateSecretKey, finalizeEvent } from "nostr-tools/pure";
-import { CHUNK_SIZE, getTerrainHeight, getChunkLayout } from "./world.js?v=15";
+import { CHUNK_SIZE, getTerrainHeight, getChunkLayout } from "./world.js?v=16";
 import {
   ITEMS,
   CROPS,
@@ -11,7 +11,7 @@ import {
   SHOP_GOODS,
   BAZAAR_PRICES,
   playSfx
-} from "./data.js?v=15";
+} from "./data.js?v=16";
 import {
   createTerrainChunkMesh,
   createResourceMesh,
@@ -28,7 +28,7 @@ import {
   rebuildPlankNailsMesh,
   createSingleNailMesh,
   animatePlayerMesh
-} from "./models.js?v=15";
+} from "./models.js?v=16";
 
 const savedProfile = JSON.parse(localStorage.getItem("project_dacha3_profile_v1") || "null");
 
@@ -2154,45 +2154,35 @@ function checkAndWeldOverlappingPlanksAtNail(plankA, nail) {
   const centerAWorld = new THREE.Vector3(plankA.x, plankA.y, plankA.z);
   const localCenterA = centerAWorld.clone().sub(centerBWorld).applyQuaternion(invQB);
 
-  // Определяем, с какой стороны доски B прибивается доска A:
-  // с боковой грани (Z), с торца (X) или сверху/снизу (Y)
-  const penX = halfB.x + halfAInB.x - Math.abs(localCenterA.x);
-  const penY = halfB.y + halfAInB.y - Math.abs(localCenterA.y);
-  const penZ = halfB.z + halfAInB.z - Math.abs(localCenterA.z);
+  // Универсальное выравнивание в локальных осях доски B (работает для лежачих, стоящих на ребре и вертикальных досок)
+  const pen = {
+    x: halfB.x + halfAInB.x - Math.abs(localCenterA.x),
+    y: halfB.y + halfAInB.y - Math.abs(localCenterA.y),
+    z: halfB.z + halfAInB.z - Math.abs(localCenterA.z)
+  };
+
+  // Ось контакта — та, вдоль которой пересечение минимально (грань соприкосновения двух досок)
+  let contactAxis = "y";
+  if (pen.x <= pen.y && pen.x <= pen.z) contactAxis = "x";
+  else if (pen.z <= pen.x && pen.z <= pen.y) contactAxis = "z";
 
   const targetLocalA = localCenterA.clone();
+  const signContact = localCenterA[contactAxis] >= 0 ? 1 : -1;
+  // Ставим доску A вплотную к грани доски B без пересечения и без зазора
+  targetLocalA[contactAxis] = signContact * (halfB[contactAxis] + halfAInB[contactAxis]);
 
-  // Если доска прибивается с боковой части доски B (или гвоздь забит сбоку)
-  const isAttachedToSideZ =
-    Math.abs(localCenterA.z) >= halfB.z - 0.04 ||
-    (isSideNailOnA && penZ <= penX && Math.abs(localCenterA.z) > 0.12);
-  const isAttachedToEndX =
-    Math.abs(localCenterA.x) >= halfB.x - 0.04 ||
-    (isSideNailOnA && penX < penZ && Math.abs(localCenterA.x) > halfB.x * 0.65);
-
-  if (isAttachedToSideZ && !isAttachedToEndX) {
-    // Прибивание вплотную к боковой грани доски B (без запрыгивания наверх и без пересечения!)
-    const signZ = localCenterA.z >= 0 ? 1 : -1;
-    targetLocalA.z = signZ * (halfB.z + halfAInB.z);
-    // Выравниваем по высоте заподлицо с нижней/верхней гранью доски B
-    if (Math.abs(halfAInB.y - halfB.y) < 0.02) {
-      targetLocalA.y = 0; // обе доски лежат в одной плоскости
+  // По двум остальным осям аккуратно выравниваем края заподлицо, если они близки (например, общее основание на земле или угол 90°)
+  for (const ax of ["x", "y", "z"]) {
+    if (ax === contactAxis) continue;
+    const flushOffset = Math.abs(halfB[ax] - halfAInB[ax]);
+    if (flushOffset < 0.02 && Math.abs(localCenterA[ax]) < 0.16) {
+      targetLocalA[ax] = 0;
     } else {
-      targetLocalA.y = halfAInB.y - halfB.y; // вертикальная доска стоит заподлицо с основанием доски B
+      const signAx = localCenterA[ax] >= 0 ? 1 : -1;
+      if (Math.abs(Math.abs(localCenterA[ax]) - flushOffset) < 0.16) {
+        targetLocalA[ax] = signAx * flushOffset;
+      }
     }
-  } else if (isAttachedToEndX) {
-    // Прибивание вплотную к торцу доски B
-    const signX = localCenterA.x >= 0 ? 1 : -1;
-    targetLocalA.x = signX * (halfB.x + halfAInB.x);
-    if (Math.abs(halfAInB.y - halfB.y) < 0.02) {
-      targetLocalA.y = 0;
-    } else {
-      targetLocalA.y = halfAInB.y - halfB.y;
-    }
-  } else {
-    // Прибивание сверху/снизу на пласть доски B (параллельно или крест-накрест под 90° или стоя вертикально сверху)
-    const signY = localCenterA.y >= -0.02 ? 1 : -1;
-    targetLocalA.y = signY * (halfB.y + halfAInB.y);
   }
 
   const localShift = targetLocalA.sub(localCenterA);
@@ -2705,18 +2695,14 @@ function stepPlanksPhysics(dt) {
     const distSqToPlayer = state.started
       ? (com.x - state.x) * (com.x - state.x) + (com.z - state.z) * (com.z - state.z)
       : 0;
-    const allResting =
-      !isGrabbed &&
-      members.every((pl) => pl.resting) &&
-      vel.lengthSq() < 1e-4 &&
-      angVel.lengthSq() < 1e-4;
+    // Отключаем физику только для очень далёких объектов (> 110м); рядом с игроком гравитация работает всегда (без левитации!)
     const isFarInactive = !isGrabbed && distSqToPlayer > 110 * 110;
 
     bodies.set(gid, {
       gid,
       members,
       isGrabbed,
-      isSleeping: allResting || isFarInactive,
+      isFarInactive,
       com,
       vel,
       angVel,
@@ -2725,22 +2711,10 @@ function stepPlanksPhysics(dt) {
     });
   }
 
-  // Пробуждаем спящие доски, если рядом с ними активно движется другая доска или схваченная рукой деталь
-  for (const bodyA of bodies.values()) {
-    if (bodyA.isSleeping && !bodyA.isGrabbed) continue;
-    for (const bodyB of bodies.values()) {
-      if (!bodyB.isSleeping) continue;
-      if (bodyA.com.distanceToSquared(bodyB.com) < 12.0) {
-        bodyB.isSleeping = false;
-        for (const pl of bodyB.members) pl.resting = false;
-      }
-    }
-  }
-
   for (let step = 0; step < subSteps; step++) {
     // 2. Интеграция внешних сил (гравитация + плавное затухание) и перемещения
     for (const body of bodies.values()) {
-      if (body.isGrabbed || body.isSleeping) continue;
+      if (body.isGrabbed || body.isFarInactive) continue;
       body.vel.y -= 16.5 * subDt;
       body.vel.multiplyScalar(Math.max(0, 1 - 0.65 * subDt));
       body.angVel.multiplyScalar(Math.max(0, 1 - 1.6 * subDt));
@@ -2753,7 +2727,7 @@ function stepPlanksPhysics(dt) {
     if (state.started) {
       const playerCenter = new THREE.Vector3(state.x, state.y + 0.55, state.z);
       for (const body of bodies.values()) {
-        if (body.isGrabbed) continue;
+        if (body.isGrabbed || body.isFarInactive) continue;
         if (body.com.distanceToSquared(playerCenter) > 16.0) continue;
         for (const pl of body.members) {
           const obb = buildPlankOBB(pl);
@@ -2762,8 +2736,6 @@ function stepPlanksPhysics(dt) {
           diff.y *= 0.5;
           const dist = diff.length();
           if (dist > 0.001 && dist < 0.42 && closest.y > state.y + 0.18) {
-            body.isSleeping = false;
-            for (const m of body.members) m.resting = false;
             const pushDir = diff.normalize();
             const pushDepth = 0.42 - dist;
             translateBody(body, pushDir.clone().multiplyScalar(pushDepth * 0.45));
@@ -2776,7 +2748,7 @@ function stepPlanksPhysics(dt) {
       }
     }
 
-    // 4. Коллизии досок друг с другом (чистое линейное разделение без паразитного раскачивания углов)
+    // 4. Коллизии досок друг с другом (с правильным опрокидыванием при свешивании края и без дрожания боковых стыков)
     for (let i = 0; i < plankList.length; i++) {
       for (let j = i + 1; j < plankList.length; j++) {
         const plA = plankList[i];
@@ -2786,7 +2758,7 @@ function stepPlanksPhysics(dt) {
         const bodyA = bodies.get(plA.groupId);
         const bodyB = bodies.get(plB.groupId);
         if (!bodyA || !bodyB) continue;
-        if ((bodyA.isGrabbed || bodyA.isSleeping) && (bodyB.isGrabbed || bodyB.isSleeping)) continue;
+        if ((bodyA.isGrabbed || bodyA.isFarInactive) && (bodyB.isGrabbed || bodyB.isFarInactive)) continue;
 
         const dx = plA.x - plB.x;
         const dy = plA.y - plB.y;
@@ -2798,47 +2770,47 @@ function stepPlanksPhysics(dt) {
         const col = testOBBCollision(obbA, obbB);
         if (!col) continue;
 
-        if (bodyA.isSleeping && !bodyA.isGrabbed) {
-          bodyA.isSleeping = false;
-          for (const p of bodyA.members) p.resting = false;
-        }
-        if (bodyB.isSleeping && !bodyB.isGrabbed) {
-          bodyB.isSleeping = false;
-          for (const p of bodyB.members) p.resting = false;
-        }
-
         const n = col.normal;
         const totalInvMass = bodyA.invMass + bodyB.invMass;
         if (totalInvMass <= 0) continue;
-
-        // Чисто линейное позиционное разделение (без вращения от проникновения, чтобы стыки на земле не дрожали)
-        const slop = 0.002;
-        if (col.depth > slop) {
-          const corrMag = ((col.depth - slop) * 0.45) / totalInvMass;
-          const corr = n.clone().multiplyScalar(corrMag);
-          if (bodyA.invMass > 0) translateBody(bodyA, corr.clone().multiplyScalar(bodyA.invMass));
-          if (bodyB.invMass > 0) translateBody(bodyB, corr.clone().multiplyScalar(-bodyB.invMass));
-        }
 
         const rA = col.point.clone().sub(bodyA.com);
         const rB = col.point.clone().sub(bodyB.com);
         const rAxN = new THREE.Vector3().crossVectors(rA, n);
         const rBxN = new THREE.Vector3().crossVectors(rB, n);
+        const isVerticalStack = Math.abs(n.y) > 0.35;
+        const rotScale = isVerticalStack ? 1.0 : 0.0;
+
         const denom =
           totalInvMass +
-          rAxN.lengthSq() * bodyA.invInertia +
-          rBxN.lengthSq() * bodyB.invInertia;
+          (rAxN.lengthSq() * bodyA.invInertia + rBxN.lengthSq() * bodyB.invInertia) * rotScale;
+
+        // Позиционное разделение: при наложении сверху учитываем рычаг (чтобы висящий край опрокидывался, а не левитировал!)
+        const slop = 0.0015;
+        if (col.depth > slop) {
+          const posImpulse = ((col.depth - slop) * 0.6) / denom;
+          if (bodyA.invMass > 0) {
+            translateBody(bodyA, n.clone().multiplyScalar(posImpulse * bodyA.invMass));
+            if (isVerticalStack) {
+              applyBodyRotationDelta(bodyA, rAxN.clone().multiplyScalar(posImpulse * bodyA.invInertia * 0.75));
+            }
+          }
+          if (bodyB.invMass > 0) {
+            translateBody(bodyB, n.clone().multiplyScalar(-posImpulse * bodyB.invMass));
+            if (isVerticalStack) {
+              applyBodyRotationDelta(bodyB, rBxN.clone().multiplyScalar(-posImpulse * bodyB.invInertia * 0.75));
+            }
+          }
+        }
 
         const velAtA = bodyA.vel.clone().add(new THREE.Vector3().crossVectors(bodyA.angVel, rA));
         const velAtB = bodyB.vel.clone().add(new THREE.Vector3().crossVectors(bodyB.angVel, rB));
         const relVel = velAtA.sub(velAtB);
         const vn = relVel.dot(n);
 
-        if (vn < -0.01) {
+        if (vn < 0) {
           const jn = -vn / denom;
           const impulseN = n.clone().multiplyScalar(jn);
-          // Вращающий момент передаём при вертикальном опирании или заметном ударе (исключает дребезг боковых стыков)
-          const rotScale = Math.abs(n.y) > 0.45 || vn < -0.25 ? 1.0 : 0.15;
 
           if (bodyA.invMass > 0) {
             bodyA.vel.addScaledVector(impulseN, bodyA.invMass);
@@ -2858,8 +2830,7 @@ function stepPlanksPhysics(dt) {
             const rBxT = new THREE.Vector3().crossVectors(rB, tangent);
             const denomT =
               totalInvMass +
-              rAxT.lengthSq() * bodyA.invInertia +
-              rBxT.lengthSq() * bodyB.invInertia;
+              (rAxT.lengthSq() * bodyA.invInertia + rBxT.lengthSq() * bodyB.invInertia) * rotScale;
             const jtMax = jn * 0.65;
             const jt = Math.max(-jtMax, Math.min(jtMax, -relVel.dot(tangent) / denomT));
             const impulseT = tangent.multiplyScalar(jt);
@@ -2878,7 +2849,7 @@ function stepPlanksPhysics(dt) {
 
     // 5. Симметричный Якоби-солвер контакта с землёй (убирает перекос углов, дребезжание и качели)
     for (const body of bodies.values()) {
-      if (body.isGrabbed || body.isSleeping) continue;
+      if (body.isGrabbed || body.isFarInactive) continue;
 
       // 5a. Симметричное позиционное выравнивание по всем точкам одновременно (Jacobi)
       for (let posIter = 0; posIter < 4; posIter++) {
@@ -2925,11 +2896,16 @@ function stepPlanksPhysics(dt) {
 
       // 5b. Симметричное решение скоростей (Jacobi Simultaneous Impulses) — одинаковые углы получают строго равный импульс
       const contacts = [];
+      let minCX = Infinity, maxCX = -Infinity, minCZ = Infinity, maxCZ = -Infinity;
       for (const pl of body.members) {
         const pts = getPlankGroundPoints(pl);
         for (const pt of pts) {
           const gY = getTerrainHeight(pt.x, pt.z);
           if (pt.y <= gY + 0.01) {
+            if (pt.x < minCX) minCX = pt.x;
+            if (pt.x > maxCX) maxCX = pt.x;
+            if (pt.z < minCZ) minCZ = pt.z;
+            if (pt.z > maxCZ) maxCZ = pt.z;
             const gx = getTerrainHeight(pt.x + 0.25, pt.z) - gY;
             const gz = getTerrainHeight(pt.x, pt.z + 0.25) - gY;
             const n = new THREE.Vector3(-gx * 4, 1, -gz * 4).normalize();
@@ -2986,27 +2962,28 @@ function stepPlanksPhysics(dt) {
         body.vel.add(dVelT);
         body.angVel.add(dAngT);
 
-        // Полная стабилизация и мгновенное засыпание покоящейся на земле доски
-        const supportDamp = contacts.length >= 3 ? 0.68 : 0.91;
+        // Проверяем, что центр масс тела действительно лежит внутри площади опоры на земле
+        const comSupported =
+          contacts.length >= 3 &&
+          body.com.x >= minCX - 0.04 &&
+          body.com.x <= maxCX + 0.04 &&
+          body.com.z >= minCZ - 0.04 &&
+          body.com.z <= maxCZ + 0.04;
+
+        const supportDamp = comSupported ? 0.65 : 0.92;
         body.vel.multiplyScalar(supportDamp);
         body.angVel.multiplyScalar(supportDamp);
-        if (contacts.length >= 3 && body.vel.lengthSq() < 0.025 && body.angVel.lengthSq() < 0.04) {
+        if (comSupported && body.vel.lengthSq() < 0.025 && body.angVel.lengthSq() < 0.04) {
           body.vel.set(0, 0, 0);
           body.angVel.set(0, 0, 0);
-          body.isSleeping = true;
-          for (const pl of body.members) pl.resting = true;
-        } else {
-          for (const pl of body.members) pl.resting = false;
         }
-      } else {
-        for (const pl of body.members) pl.resting = false;
       }
     }
   }
 
   // 6. Записываем обновлённые скорости и координаты в доски один раз после всех подшагов
   for (const body of bodies.values()) {
-    if (body.isGrabbed) continue;
+    if (body.isGrabbed || body.isFarInactive) continue;
     for (const pl of body.members) {
       pl.x = +pl.x.toFixed(4);
       pl.y = +pl.y.toFixed(4);
