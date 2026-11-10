@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { Peer } from "peerjs";
 import mqtt from "mqtt";
 import { generateSecretKey, finalizeEvent } from "nostr-tools/pure";
-import { CHUNK_SIZE, getTerrainHeight, getChunkLayout } from "./world.js?v=17";
+import { CHUNK_SIZE, getTerrainHeight, getChunkLayout } from "./world.js?v=18";
 import {
   ITEMS,
   CROPS,
@@ -11,7 +11,7 @@ import {
   SHOP_GOODS,
   BAZAAR_PRICES,
   playSfx
-} from "./data.js?v=17";
+} from "./data.js?v=18";
 import {
   createTerrainChunkMesh,
   createResourceMesh,
@@ -28,7 +28,7 @@ import {
   rebuildPlankNailsMesh,
   createSingleNailMesh,
   animatePlayerMesh
-} from "./models.js?v=17";
+} from "./models.js?v=18";
 
 const savedProfile = JSON.parse(localStorage.getItem("project_dacha3_profile_v1") || "null");
 
@@ -42,6 +42,7 @@ const state = {
   energy: savedProfile?.energy ?? 100,
   tools: savedProfile?.tools || { axe: false, hammer: true, saw: true, watering_can: false },
   heldItem: savedProfile?.heldItem || "axe",
+  stashedInBackpack: Array.isArray(savedProfile?.stashedInBackpack) ? savedProfile.stashedInBackpack : [],
   inv: savedProfile?.inv || {
     wood: 0,
     branch: 0,
@@ -131,6 +132,7 @@ function saveLocalProfile() {
         energy: state.energy,
         tools: state.tools,
         heldItem: state.heldItem,
+        stashedInBackpack: state.stashedInBackpack,
         inv: state.inv,
         plots: state.plots,
         plankSystemV9: true,
@@ -1288,8 +1290,39 @@ export function getHeldItemTitle(id = state.heldItem) {
   return "✋ Пустая рука";
 }
 
+function isStashedInBackpack(id) {
+  if (!id || id === "hand") return false;
+  return Array.isArray(state.stashedInBackpack) && state.stashedInBackpack.includes(id);
+}
+
+function unstashFromBackpack(id) {
+  if (!Array.isArray(state.stashedInBackpack)) state.stashedInBackpack = [];
+  state.stashedInBackpack = state.stashedInBackpack.filter((x) => x !== id);
+}
+
+function stashHeldItemToBackpack(targetId = state.heldItem) {
+  if (!targetId || targetId === "hand") {
+    showToast("✋ Пустую руку нельзя убрать в рюкзак! Возьмите любой предмет или инструмент и нажмите [G].");
+    return;
+  }
+  if (!Array.isArray(state.stashedInBackpack)) state.stashedInBackpack = [];
+  if (!state.stashedInBackpack.includes(targetId)) {
+    state.stashedInBackpack.push(targetId);
+  }
+  const itemTitle = getHeldItemTitle(targetId).split(" (")[0];
+  if (state.heldItem === targetId) {
+    state.heldItem = "hand";
+    updateFirstPersonHeldItem(fpHand, state.heldItem, state.tools.axe);
+    updateThirdPersonHeldItem(selfMesh, state.heldItem, state.tools.axe);
+  }
+  playSfx("pick");
+  updateHudUI();
+  saveLocalProfile();
+  showToast(`🎒 «${itemTitle}» убран в рюкзак и скрыт из рабочего инвентаря! Достать: [I] Инвентарь.`);
+}
+
 function getHotbarSlots() {
-  const slots = [
+  const rawSlots = [
     { id: "hand", icon: "✋", name: "Рука", count: null, kind: "tool" },
     { id: "plank", icon: "🪵", name: "Доска", count: state.inv.plank || 0, kind: "item" },
     { id: "nails", icon: "🔩", name: "Гвозди", count: state.inv.nails || 0, kind: "item" },
@@ -1298,14 +1331,12 @@ function getHotbarSlots() {
     { id: "axe", icon: "🪓", name: state.tools.axe ? "Сталь. топор" : "Топор", count: null, kind: "tool" }
   ];
   if (state.tools.watering_can) {
-    slots.push({ id: "watering_can", icon: "🚿", name: "Лейка", count: null, kind: "tool" });
+    rawSlots.push({ id: "watering_can", icon: "🚿", name: "Лейка", count: null, kind: "tool" });
   }
-  let anyFoodAdded = false;
   for (const fk of FOOD_KEYS) {
     const cnt = state.inv[fk] || 0;
     if (cnt > 0) {
-      anyFoodAdded = true;
-      slots.push({
+      rawSlots.push({
         id: fk,
         icon: ITEMS[fk].icon,
         name: ITEMS[fk].name,
@@ -1314,11 +1345,13 @@ function getHotbarSlots() {
       });
     }
   }
-  if (!anyFoodAdded) {
-    slots.push({ id: "berry", icon: "🍓", name: "Еда (нет)", count: 0, kind: "empty_food" });
-  }
+  // Отфильтровываем предметы, которые игрок убрал в рюкзак кнопкой [G]
+  const slots = rawSlots.filter((s) => s.id === "hand" || !isStashedInBackpack(s.id));
+
   if (
     state.heldItem &&
+    state.heldItem !== "hand" &&
+    !isStashedInBackpack(state.heldItem) &&
     !slots.some((s) => s.id === state.heldItem) &&
     ITEMS[state.heldItem] &&
     (state.inv[state.heldItem] || 0) > 0
@@ -1335,6 +1368,7 @@ function getHotbarSlots() {
 }
 
 function selectHeldItem(id, silent = false) {
+  unstashFromBackpack(id);
   if (id === "berry" && (state.inv.berry || 0) <= 0) {
     showToast("🍓 У вас пока нет ягод! Соберите их с ягодного куста [E] или купите пирожок в Магазине.");
     return;
@@ -1426,41 +1460,74 @@ function openInventoryModal() {
 
   baseTools.forEach((t) => {
     const isHeld = state.heldItem === t.id;
+    const stashed = isStashedInBackpack(t.id);
     const card = document.createElement("div");
     card.className = "card-item";
     card.innerHTML = `
       <div>
-        <div class="card-title">${t.icon} ${t.name} ${isHeld ? '<span style="color:#ffd54f">• В РУКЕ</span>' : ""}</div>
+        <div class="card-title">
+          ${t.icon} ${t.name}
+          ${isHeld ? '<span style="color:#ffd54f">• В РУКЕ</span>' : ""}
+          ${stashed ? '<span style="color:#ffb74d">• 🎒 В РЮКЗАКЕ</span>' : ""}
+        </div>
         <div class="card-desc">${t.desc}</div>
       </div>
-      <button class="card-btn" style="${isHeld ? "background:#2e7d32;" : ""}">${isHeld ? "✅ Сейчас в руке" : "🖐️ Взять в руку"}</button>
+      <div style="display:flex;gap:6px;">
+        <button class="card-btn btn-equip" style="flex:1;${isHeld ? "background:#2e7d32;" : ""}">${
+          isHeld ? "✅ Сейчас в руке" : stashed ? "📤 Достать из рюкзака" : "🖐️ Взять в руку"
+        }</button>
+        ${
+          t.id !== "hand" && !stashed
+            ? `<button class="card-btn btn-stash" style="background:#455a64;" title="Скрыть из рабочего инвентаря [G]">🎒 В рюкзак</button>`
+            : ""
+        }
+      </div>
     `;
-    card.querySelector("button").addEventListener("click", () => {
+    card.querySelector(".btn-equip").addEventListener("click", () => {
       selectHeldItem(t.id);
       openInventoryModal();
     });
+    const stashBtn = card.querySelector(".btn-stash");
+    if (stashBtn) {
+      stashBtn.addEventListener("click", () => {
+        stashHeldItemToBackpack(t.id);
+        openInventoryModal();
+      });
+    }
     modalBody.appendChild(card);
   });
 
   Object.entries(ITEMS).forEach(([key, info]) => {
     const cnt = state.inv[key] || 0;
-    if (cnt <= 0 && key !== "nails") return;
+    if (cnt <= 0 && key !== "nails" && key !== "plank") return;
     const isHeld = state.heldItem === key;
+    const stashed = isStashedInBackpack(key);
     const card = document.createElement("div");
     card.className = "card-item";
     const descText = info.food > 0
       ? `Еда (+${info.food}% сытости). Возьмите в руку и нажмите [F], чтобы съесть!`
       : key === "nails"
-      ? "Строительный крепёж. Можно держать в руке [4] при постройке объектов на участке."
-      : "Ресурс для строительства, огорода, крафта или продажи на Базаре.";
+      ? "Строительный крепёж. Держите в руке для забивания гвоздей в доски."
+      : "Предмет можно носить на рабочей панели или убрать в рюкзак кнопкой [G].";
     card.innerHTML = `
       <div>
-        <div class="card-title">${info.icon} ${info.name}: <span style="color:#ffd54f">${cnt} шт.</span> ${isHeld ? '<span style="color:#69f0ae">• В РУКЕ</span>' : ""}</div>
+        <div class="card-title">
+          ${info.icon} ${info.name}: <span style="color:#ffd54f">${cnt} шт.</span>
+          ${isHeld ? '<span style="color:#69f0ae">• В РУКЕ</span>' : ""}
+          ${stashed ? '<span style="color:#ffb74d">• 🎒 В РЮКЗАКЕ</span>' : ""}
+        </div>
         <div class="card-desc">${descText}</div>
       </div>
       <div style="display:flex;gap:6px;">
-        <button class="card-btn btn-equip" style="flex:1;${isHeld ? "background:#2e7d32;" : ""}" ${cnt <= 0 ? "disabled" : ""}>${isHeld ? "✅ В руке" : "🖐️ Взять в руку"}</button>
-        ${info.food > 0 && isHeld && cnt > 0 ? `<button class="card-btn btn-eat-held" style="flex:1;background:#ef6c00;">😋 Съесть с руки</button>` : ""}
+        <button class="card-btn btn-equip" style="flex:1;${isHeld ? "background:#2e7d32;" : ""}" ${cnt <= 0 ? "disabled" : ""}>${
+          isHeld ? "✅ В руке" : stashed ? "📤 Достать из рюкзака" : "🖐️ Взять в руку"
+        }</button>
+        ${
+          !stashed
+            ? `<button class="card-btn btn-stash" style="background:#455a64;" title="Скрыть из рабочего инвентаря [G]">🎒 В рюкзак</button>`
+            : ""
+        }
+        ${info.food > 0 && isHeld && cnt > 0 ? `<button class="card-btn btn-eat-held" style="flex:1;background:#ef6c00;">😋 Съесть</button>` : ""}
       </div>
     `;
     card.querySelector(".btn-equip").addEventListener("click", () => {
@@ -1468,6 +1535,13 @@ function openInventoryModal() {
       selectHeldItem(key);
       openInventoryModal();
     });
+    const stashBtn = card.querySelector(".btn-stash");
+    if (stashBtn) {
+      stashBtn.addEventListener("click", () => {
+        stashHeldItemToBackpack(key);
+        openInventoryModal();
+      });
+    }
     const eatBtn = card.querySelector(".btn-eat-held");
     if (eatBtn) {
       eatBtn.addEventListener("click", () => {
@@ -3238,6 +3312,7 @@ window.addEventListener("keydown", (e) => {
     else executeInteraction(findNearestInteractable());
   } else if (k === "KeyI" || k === "Tab") { e.preventDefault(); openInventoryModal(); }
   else if (k === "KeyF" && !grabState.active) eatFoodAction();
+  else if (k === "KeyG" && !grabState.active) stashHeldItemToBackpack();
   else if (k === "KeyC") openCraftModal();
   else if (k === "KeyB") openBuildModal();
   else if (k === "KeyX" && !grabState.active) demolishNearestStructure();
