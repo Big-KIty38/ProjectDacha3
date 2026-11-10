@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { Peer } from "peerjs";
 import mqtt from "mqtt";
 import { generateSecretKey, finalizeEvent } from "nostr-tools/pure";
-import { CHUNK_SIZE, getTerrainHeight, getChunkLayout } from "./world.js?v=13";
+import { CHUNK_SIZE, getTerrainHeight, getChunkLayout } from "./world.js?v=15";
 import {
   ITEMS,
   CROPS,
@@ -11,7 +11,7 @@ import {
   SHOP_GOODS,
   BAZAAR_PRICES,
   playSfx
-} from "./data.js?v=13";
+} from "./data.js?v=15";
 import {
   createTerrainChunkMesh,
   createResourceMesh,
@@ -28,7 +28,7 @@ import {
   rebuildPlankNailsMesh,
   createSingleNailMesh,
   animatePlayerMesh
-} from "./models.js?v=13";
+} from "./models.js?v=15";
 
 const savedProfile = JSON.parse(localStorage.getItem("project_dacha3_profile_v1") || "null");
 
@@ -2659,7 +2659,7 @@ function stepPlanksPhysics(dt) {
   const plankList = Object.values(state.planks);
   if (plankList.length === 0) return;
 
-  const simDt = Math.min(dt, 0.045);
+  const simDt = Math.min(dt, 0.04);
   const subSteps = 4;
   const subDt = simDt / subSteps;
 
@@ -2702,16 +2702,14 @@ function stepPlanksPhysics(dt) {
     }
     const invInertia = isGrabbed ? 0 : 1.0 / Math.max(0.45, totalInertia);
 
-    // Засыпание покоящихся построек и отсечка далёких объектов (> 110м) для стабильных 60 FPS при 50+ игроках
     const distSqToPlayer = state.started
       ? (com.x - state.x) * (com.x - state.x) + (com.z - state.z) * (com.z - state.z)
       : 0;
     const allResting =
       !isGrabbed &&
       members.every((pl) => pl.resting) &&
-      vel.lengthSq() < 1e-5 &&
-      angVel.lengthSq() < 1e-5 &&
-      distSqToPlayer > 18.0;
+      vel.lengthSq() < 1e-4 &&
+      angVel.lengthSq() < 1e-4;
     const isFarInactive = !isGrabbed && distSqToPlayer > 110 * 110;
 
     bodies.set(gid, {
@@ -2727,12 +2725,12 @@ function stepPlanksPhysics(dt) {
     });
   }
 
-  // Пробуждаем спящие доски, если рядом с ними падает или движется активная доска
+  // Пробуждаем спящие доски, если рядом с ними активно движется другая доска или схваченная рукой деталь
   for (const bodyA of bodies.values()) {
-    if (bodyA.isSleeping) continue;
+    if (bodyA.isSleeping && !bodyA.isGrabbed) continue;
     for (const bodyB of bodies.values()) {
       if (!bodyB.isSleeping) continue;
-      if (bodyA.com.distanceToSquared(bodyB.com) < 28.0) {
+      if (bodyA.com.distanceToSquared(bodyB.com) < 12.0) {
         bodyB.isSleeping = false;
         for (const pl of bodyB.members) pl.resting = false;
       }
@@ -2744,8 +2742,8 @@ function stepPlanksPhysics(dt) {
     for (const body of bodies.values()) {
       if (body.isGrabbed || body.isSleeping) continue;
       body.vel.y -= 16.5 * subDt;
-      body.vel.multiplyScalar(Math.max(0, 1 - 0.55 * subDt));
-      body.angVel.multiplyScalar(Math.max(0, 1 - 1.35 * subDt));
+      body.vel.multiplyScalar(Math.max(0, 1 - 0.65 * subDt));
+      body.angVel.multiplyScalar(Math.max(0, 1 - 1.6 * subDt));
 
       translateBody(body, body.vel.clone().multiplyScalar(subDt));
       applyBodyRotationDelta(body, body.angVel.clone().multiplyScalar(subDt));
@@ -2756,6 +2754,7 @@ function stepPlanksPhysics(dt) {
       const playerCenter = new THREE.Vector3(state.x, state.y + 0.55, state.z);
       for (const body of bodies.values()) {
         if (body.isGrabbed) continue;
+        if (body.com.distanceToSquared(playerCenter) > 16.0) continue;
         for (const pl of body.members) {
           const obb = buildPlankOBB(pl);
           const closest = clampPointToOBB(playerCenter, obb);
@@ -2763,11 +2762,13 @@ function stepPlanksPhysics(dt) {
           diff.y *= 0.5;
           const dist = diff.length();
           if (dist > 0.001 && dist < 0.42 && closest.y > state.y + 0.18) {
+            body.isSleeping = false;
+            for (const m of body.members) m.resting = false;
             const pushDir = diff.normalize();
             const pushDepth = 0.42 - dist;
             translateBody(body, pushDir.clone().multiplyScalar(pushDepth * 0.45));
             const r = closest.clone().sub(body.com);
-            const impulse = pushDir.clone().multiplyScalar(0.95);
+            const impulse = pushDir.clone().multiplyScalar(0.85);
             body.vel.addScaledVector(impulse, body.invMass);
             body.angVel.addScaledVector(new THREE.Vector3().crossVectors(r, impulse), body.invInertia);
           }
@@ -2775,7 +2776,7 @@ function stepPlanksPhysics(dt) {
       }
     }
 
-    // 4. Коллизии досок друг с другом (OBB vs OBB SAT + импульс + естественный крутящий момент)
+    // 4. Коллизии досок друг с другом (чистое линейное разделение без паразитного раскачивания углов)
     for (let i = 0; i < plankList.length; i++) {
       for (let j = i + 1; j < plankList.length; j++) {
         const plA = plankList[i];
@@ -2786,10 +2787,7 @@ function stepPlanksPhysics(dt) {
         const bodyB = bodies.get(plB.groupId);
         if (!bodyA || !bodyB) continue;
         if ((bodyA.isGrabbed || bodyA.isSleeping) && (bodyB.isGrabbed || bodyB.isSleeping)) continue;
-        if (bodyA.isSleeping) { bodyA.isSleeping = false; for (const p of bodyA.members) p.resting = false; }
-        if (bodyB.isSleeping) { bodyB.isSleeping = false; for (const p of bodyB.members) p.resting = false; }
 
-        // Быстрая отсечка по расстоянию до построения OBB
         const dx = plA.x - plB.x;
         const dy = plA.y - plB.y;
         const dz = plA.z - plB.z;
@@ -2800,9 +2798,27 @@ function stepPlanksPhysics(dt) {
         const col = testOBBCollision(obbA, obbB);
         if (!col) continue;
 
+        if (bodyA.isSleeping && !bodyA.isGrabbed) {
+          bodyA.isSleeping = false;
+          for (const p of bodyA.members) p.resting = false;
+        }
+        if (bodyB.isSleeping && !bodyB.isGrabbed) {
+          bodyB.isSleeping = false;
+          for (const p of bodyB.members) p.resting = false;
+        }
+
         const n = col.normal;
         const totalInvMass = bodyA.invMass + bodyB.invMass;
         if (totalInvMass <= 0) continue;
+
+        // Чисто линейное позиционное разделение (без вращения от проникновения, чтобы стыки на земле не дрожали)
+        const slop = 0.002;
+        if (col.depth > slop) {
+          const corrMag = ((col.depth - slop) * 0.45) / totalInvMass;
+          const corr = n.clone().multiplyScalar(corrMag);
+          if (bodyA.invMass > 0) translateBody(bodyA, corr.clone().multiplyScalar(bodyA.invMass));
+          if (bodyB.invMass > 0) translateBody(bodyB, corr.clone().multiplyScalar(-bodyB.invMass));
+        }
 
         const rA = col.point.clone().sub(bodyA.com);
         const rB = col.point.clone().sub(bodyB.com);
@@ -2813,40 +2829,27 @@ function stepPlanksPhysics(dt) {
           rAxN.lengthSq() * bodyA.invInertia +
           rBxN.lengthSq() * bodyB.invInertia;
 
-        // Мягкое позиционное выталкивание с учётом массы и инерции (без двойного раскачивания)
-        const slop = 0.0015;
-        if (col.depth > slop) {
-          const posImpulse = ((col.depth - slop) * 0.55) / denom;
-          if (bodyA.invMass > 0) {
-            translateBody(bodyA, n.clone().multiplyScalar(posImpulse * bodyA.invMass));
-            applyBodyRotationDelta(bodyA, rAxN.clone().multiplyScalar(posImpulse * bodyA.invInertia * 0.45));
-          }
-          if (bodyB.invMass > 0) {
-            translateBody(bodyB, n.clone().multiplyScalar(-posImpulse * bodyB.invMass));
-            applyBodyRotationDelta(bodyB, rBxN.clone().multiplyScalar(-posImpulse * bodyB.invInertia * 0.45));
-          }
-        }
-
         const velAtA = bodyA.vel.clone().add(new THREE.Vector3().crossVectors(bodyA.angVel, rA));
         const velAtB = bodyB.vel.clone().add(new THREE.Vector3().crossVectors(bodyB.angVel, rB));
         const relVel = velAtA.sub(velAtB);
         const vn = relVel.dot(n);
 
-        if (vn < 0) {
-          const restitution = vn < -2.4 ? 0.04 : 0.0;
-          const jn = (-(1 + restitution) * vn) / denom;
+        if (vn < -0.01) {
+          const jn = -vn / denom;
           const impulseN = n.clone().multiplyScalar(jn);
+          // Вращающий момент передаём при вертикальном опирании или заметном ударе (исключает дребезг боковых стыков)
+          const rotScale = Math.abs(n.y) > 0.45 || vn < -0.25 ? 1.0 : 0.15;
 
           if (bodyA.invMass > 0) {
             bodyA.vel.addScaledVector(impulseN, bodyA.invMass);
-            bodyA.angVel.addScaledVector(new THREE.Vector3().crossVectors(rA, impulseN), bodyA.invInertia);
+            bodyA.angVel.addScaledVector(new THREE.Vector3().crossVectors(rA, impulseN), bodyA.invInertia * rotScale);
           }
           if (bodyB.invMass > 0) {
             bodyB.vel.addScaledVector(impulseN, -bodyB.invMass);
-            bodyB.angVel.addScaledVector(new THREE.Vector3().crossVectors(rB, impulseN.clone().negate()), bodyB.invInertia);
+            bodyB.angVel.addScaledVector(new THREE.Vector3().crossVectors(rB, impulseN.clone().negate()), bodyB.invInertia * rotScale);
           }
 
-          // Импульс сухого трения дерева о дерево
+          // Трение дерева о дерево
           const tangent = relVel.clone().addScaledVector(n, -vn);
           const tLen = tangent.length();
           if (tLen > 1e-5) {
@@ -2862,119 +2865,148 @@ function stepPlanksPhysics(dt) {
             const impulseT = tangent.multiplyScalar(jt);
             if (bodyA.invMass > 0) {
               bodyA.vel.addScaledVector(impulseT, bodyA.invMass);
-              bodyA.angVel.addScaledVector(new THREE.Vector3().crossVectors(rA, impulseT), bodyA.invInertia);
+              bodyA.angVel.addScaledVector(new THREE.Vector3().crossVectors(rA, impulseT), bodyA.invInertia * rotScale);
             }
             if (bodyB.invMass > 0) {
               bodyB.vel.addScaledVector(impulseT, -bodyB.invMass);
-              bodyB.angVel.addScaledVector(new THREE.Vector3().crossVectors(rB, impulseT.clone().negate()), bodyB.invInertia);
+              bodyB.angVel.addScaledVector(new THREE.Vector3().crossVectors(rB, impulseT.clone().negate()), bodyB.invInertia * rotScale);
             }
           }
         }
       }
     }
 
-    // 5. Итеративный солвер контакта с землёй (NGS по позиции + Sequential Impulses по скорости без отскоков и качелей)
+    // 5. Симметричный Якоби-солвер контакта с землёй (убирает перекос углов, дребезжание и качели)
     for (const body of bodies.values()) {
       if (body.isGrabbed || body.isSleeping) continue;
 
-      // 5a. Позиционный NGS-солвер с пересчётом вершин на лету (исключает перелёт и подпрыгивание)
-      for (let posIter = 0; posIter < 3; posIter++) {
-        let anyPen = false;
+      // 5a. Симметричное позиционное выравнивание по всем точкам одновременно (Jacobi)
+      for (let posIter = 0; posIter < 4; posIter++) {
+        const linCorr = new THREE.Vector3();
+        const angCorr = new THREE.Vector3();
+        let penCount = 0;
+
         for (const pl of body.members) {
           const pts = getPlankGroundPoints(pl);
           for (const pt of pts) {
             const gY = getTerrainHeight(pt.x, pt.z);
             const pen = gY - pt.y;
-            if (pen > 0.0005) {
-              anyPen = true;
+            if (pen > 0.0003) {
+              penCount++;
               const gx = getTerrainHeight(pt.x + 0.25, pt.z) - gY;
               const gz = getTerrainHeight(pt.x, pt.z + 0.25) - gY;
               const n = new THREE.Vector3(-gx * 4, 1, -gz * 4).normalize();
               const r = pt.clone().sub(body.com);
               const rXn = new THREE.Vector3().crossVectors(r, n);
               const k = body.invMass + rXn.lengthSq() * body.invInertia;
-              const dp = ((pen - 0.0005) * 0.55) / k;
-              translateBody(body, n.clone().multiplyScalar(dp * body.invMass));
-              applyBodyRotationDelta(body, rXn.multiplyScalar(dp * body.invInertia));
+              const dp = ((pen - 0.0003) * 0.7) / k;
+              linCorr.addScaledVector(n, dp * body.invMass);
+              angCorr.addScaledVector(rXn, dp * body.invInertia);
             }
           }
         }
-        if (!anyPen) break;
+        if (penCount === 0) break;
+        translateBody(body, linCorr.multiplyScalar(1 / penCount));
+        applyBodyRotationDelta(body, angCorr.multiplyScalar(1 / penCount));
       }
 
-      // 5b. Сбор активных опорных точек и итеративное решение скоростей (Sequential Impulses с накоплением импульса)
+      // Чистый подъём оставшегося микро-проникновения строго вверх без вращения
+      let maxRemPen = 0;
+      for (const pl of body.members) {
+        const pts = getPlankGroundPoints(pl);
+        for (const pt of pts) {
+          const pen = getTerrainHeight(pt.x, pt.z) - pt.y;
+          if (pen > maxRemPen) maxRemPen = pen;
+        }
+      }
+      if (maxRemPen > 0) {
+        translateBody(body, new THREE.Vector3(0, maxRemPen, 0));
+      }
+
+      // 5b. Симметричное решение скоростей (Jacobi Simultaneous Impulses) — одинаковые углы получают строго равный импульс
       const contacts = [];
       for (const pl of body.members) {
         const pts = getPlankGroundPoints(pl);
         for (const pt of pts) {
           const gY = getTerrainHeight(pt.x, pt.z);
-          if (pt.y <= gY + 0.012) {
+          if (pt.y <= gY + 0.01) {
             const gx = getTerrainHeight(pt.x + 0.25, pt.z) - gY;
             const gz = getTerrainHeight(pt.x, pt.z + 0.25) - gY;
             const n = new THREE.Vector3(-gx * 4, 1, -gz * 4).normalize();
             const r = pt.clone().sub(body.com);
             const rXn = new THREE.Vector3().crossVectors(r, n);
             const k = body.invMass + rXn.lengthSq() * body.invInertia;
-            const vnInit = body.vel.clone().add(new THREE.Vector3().crossVectors(body.angVel, r)).dot(n);
-            const targetBounce = vnInit < -3.5 ? -vnInit * 0.03 : 0;
-            contacts.push({ pt, n, r, k, jnAcc: 0, targetBounce });
+            contacts.push({ pt, n, r, k, jnAcc: 0 });
           }
         }
       }
 
       if (contacts.length > 0) {
-        for (let velIter = 0; velIter < 5; velIter++) {
+        const weight = 1 / Math.max(1, Math.min(4, contacts.length * 0.5));
+        for (let velIter = 0; velIter < 8; velIter++) {
+          const dVel = new THREE.Vector3();
+          const dAng = new THREE.Vector3();
           for (const c of contacts) {
             const velAtPt = body.vel.clone().add(new THREE.Vector3().crossVectors(body.angVel, c.r));
             const vn = velAtPt.dot(c.n);
-            const dj = (c.targetBounce - vn) / c.k;
+            const dj = (-vn / c.k) * weight;
             const newJn = Math.max(0, c.jnAcc + dj);
             const actualJn = newJn - c.jnAcc;
             c.jnAcc = newJn;
 
-            if (Math.abs(actualJn) > 1e-7) {
+            if (Math.abs(actualJn) > 1e-8) {
               const impN = c.n.clone().multiplyScalar(actualJn);
-              body.vel.addScaledVector(impN, body.invMass);
-              body.angVel.addScaledVector(new THREE.Vector3().crossVectors(c.r, impN), body.invInertia);
-            }
-
-            // Сухое трение о траву/землю
-            if (c.jnAcc > 0) {
-              const velAfter = body.vel.clone().add(new THREE.Vector3().crossVectors(body.angVel, c.r));
-              const tang = velAfter.clone().addScaledVector(c.n, -velAfter.dot(c.n));
-              const tLen = tang.length();
-              if (tLen > 1e-5) {
-                tang.multiplyScalar(1 / tLen);
-                const rXt = new THREE.Vector3().crossVectors(c.r, tang);
-                const kt = body.invMass + rXt.lengthSq() * body.invInertia;
-                const maxJt = c.jnAcc * 0.72;
-                const jt = Math.max(-maxJt, Math.min(maxJt, -velAfter.dot(tang) / kt));
-                const impT = tang.multiplyScalar(jt);
-                body.vel.addScaledVector(impT, body.invMass);
-                body.angVel.addScaledVector(new THREE.Vector3().crossVectors(c.r, impT), body.invInertia);
-              }
+              dVel.addScaledVector(impN, body.invMass);
+              dAng.addScaledVector(new THREE.Vector3().crossVectors(c.r, impN), body.invInertia);
             }
           }
+          body.vel.add(dVel);
+          body.angVel.add(dAng);
         }
 
-        // Гашение микроколебаний и засыпание при устойчивой опоре на землю
-        const supportDamp = contacts.length >= 3 ? 0.78 : 0.93;
+        // Симметричное сухое трение о траву/землю
+        const dVelT = new THREE.Vector3();
+        const dAngT = new THREE.Vector3();
+        for (const c of contacts) {
+          if (c.jnAcc <= 0) continue;
+          const velAfter = body.vel.clone().add(new THREE.Vector3().crossVectors(body.angVel, c.r));
+          const tang = velAfter.clone().addScaledVector(c.n, -velAfter.dot(c.n));
+          const tLen = tang.length();
+          if (tLen > 1e-6) {
+            tang.multiplyScalar(1 / tLen);
+            const rXt = new THREE.Vector3().crossVectors(c.r, tang);
+            const kt = body.invMass + rXt.lengthSq() * body.invInertia;
+            const maxJt = c.jnAcc * 0.78;
+            const jt = Math.max(-maxJt, Math.min(maxJt, (-velAfter.dot(tang) / kt) * weight));
+            const impT = tang.multiplyScalar(jt);
+            dVelT.addScaledVector(impT, body.invMass);
+            dAngT.addScaledVector(new THREE.Vector3().crossVectors(c.r, impT), body.invInertia);
+          }
+        }
+        body.vel.add(dVelT);
+        body.angVel.add(dAngT);
+
+        // Полная стабилизация и мгновенное засыпание покоящейся на земле доски
+        const supportDamp = contacts.length >= 3 ? 0.68 : 0.91;
         body.vel.multiplyScalar(supportDamp);
         body.angVel.multiplyScalar(supportDamp);
-        if (contacts.length >= 3 && body.vel.lengthSq() < 0.006 && body.angVel.lengthSq() < 0.01) {
+        if (contacts.length >= 3 && body.vel.lengthSq() < 0.025 && body.angVel.lengthSq() < 0.04) {
           body.vel.set(0, 0, 0);
           body.angVel.set(0, 0, 0);
+          body.isSleeping = true;
           for (const pl of body.members) pl.resting = true;
         } else {
           for (const pl of body.members) pl.resting = false;
         }
+      } else {
+        for (const pl of body.members) pl.resting = false;
       }
     }
   }
 
   // 6. Записываем обновлённые скорости и координаты в доски один раз после всех подшагов
   for (const body of bodies.values()) {
-    if (body.isGrabbed || body.isSleeping) continue;
+    if (body.isGrabbed) continue;
     for (const pl of body.members) {
       pl.x = +pl.x.toFixed(4);
       pl.y = +pl.y.toFixed(4);
