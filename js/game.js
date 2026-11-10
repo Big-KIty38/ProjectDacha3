@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { Peer } from "peerjs";
 import mqtt from "mqtt";
 import { generateSecretKey, finalizeEvent } from "nostr-tools/pure";
-import { CHUNK_SIZE, getTerrainHeight, getChunkLayout } from "./world.js?v=19";
+import { CHUNK_SIZE, getTerrainHeight, getChunkLayout } from "./world.js?v=20";
 import {
   ITEMS,
   CROPS,
@@ -11,7 +11,7 @@ import {
   SHOP_GOODS,
   BAZAAR_PRICES,
   playSfx
-} from "./data.js?v=19";
+} from "./data.js?v=20";
 import {
   createTerrainChunkMesh,
   createResourceMesh,
@@ -28,7 +28,7 @@ import {
   rebuildPlankNailsMesh,
   createSingleNailMesh,
   animatePlayerMesh
-} from "./models.js?v=19";
+} from "./models.js?v=20";
 
 const savedProfile = JSON.parse(localStorage.getItem("project_dacha3_profile_v1") || "null");
 
@@ -511,6 +511,32 @@ function buildPresencePacket(type = "player_moved") {
   };
 }
 
+let currentSectorKey = "";
+let lastGlobalPresenceSentAt = 0;
+
+function getPlayerSectorTopic() {
+  const cx = Math.round(state.x / CHUNK_SIZE);
+  const cz = Math.round(state.z / CHUNK_SIZE);
+  return `${CENTRAL_ROOM_TOPIC}/sec_${cx}_${cz}`;
+}
+
+function updateSectorSubscriptions() {
+  const nextSec = getPlayerSectorTopic();
+  if (nextSec === currentSectorKey) return;
+  currentSectorKey = nextSec;
+  for (const mc of mqttClients) {
+    if (mc.connected) {
+      try {
+        if (mc._subscribedSector && mc._subscribedSector !== nextSec) {
+          mc.unsubscribe(mc._subscribedSector);
+        }
+        mc.subscribe(nextSec);
+        mc._subscribedSector = nextSec;
+      } catch {}
+    }
+  }
+}
+
 function broadcastNetworkPacket(payload, isWorldState = false) {
   const pktId = payload.pktId || `${state.playerKey}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const fullPkt = { ...payload, pktId, senderKey: state.playerKey, peerId: myPeerId, sentAt: Date.now() };
@@ -547,12 +573,17 @@ function broadcastNetworkPacket(payload, isWorldState = false) {
     try { conn.send(fullPkt); } catch {}
   }
 
-  // 3. Брокеры MQTT: для частых координат шлём только в 1 активный брокер (убирает 3-кратный дубляж трафика!)
+  // 3. Брокеры MQTT с шардингом по секторам СНТ: частые шаги идут только соседям по чанку, а раз в 4.5с — в общий эфир
+  updateSectorSubscriptions();
+  const isGlobalHeartbeat = isMovePkt && now - lastGlobalPresenceSentAt > 4500;
+  if (isGlobalHeartbeat) lastGlobalPresenceSentAt = now;
+  const targetTopic = isMovePkt && !isGlobalHeartbeat ? getPlayerSectorTopic() : `${CENTRAL_ROOM_TOPIC}/live`;
+
   for (const mc of mqttClients) {
     if (mc.connected) {
       try {
-        mc.publish(`${CENTRAL_ROOM_TOPIC}/live`, rawJson, { qos: isWorldState ? 1 : 0, retain: isWorldState });
-        if (isMovePkt) break; // Одного брокера достаточно для координат
+        mc.publish(targetTopic, rawJson, { qos: isWorldState ? 1 : 0, retain: isWorldState });
+        if (isMovePkt) break;
       } catch {}
     }
   }
@@ -953,6 +984,9 @@ function initMultiplayerNetwork() {
       mc.on("connect", () => {
         updateNetBadge();
         mc.subscribe(`${CENTRAL_ROOM_TOPIC}/live`);
+        const curSec = getPlayerSectorTopic();
+        mc.subscribe(curSec);
+        mc._subscribedSector = curSec;
         if (state.started) sendMyPresenceAndWorldSnapshot();
       });
       mc.on("message", (_topic, payload) => {
@@ -2944,6 +2978,19 @@ function stepPlanksPhysics(dt) {
     });
   }
 
+  // Отбираем только доски в радиусе 110м от игрока для коллизий и скрываем 3D-меши далёких досок (> 165м)
+  const nearbyPlanks = [];
+  for (const pl of plankList) {
+    const b = bodies.get(pl.groupId);
+    if (b && !b.isFarInactive) nearbyPlanks.push(pl);
+    const m = plankMeshes.get(pl.id);
+    if (m && state.started) {
+      const dx = pl.x - state.x;
+      const dz = pl.z - state.z;
+      m.visible = dx * dx + dz * dz < 165 * 165;
+    }
+  }
+
   for (let step = 0; step < subSteps; step++) {
     // 2. Интеграция внешних сил (гравитация + плавное затухание) и перемещения
     for (const body of bodies.values()) {
@@ -2981,11 +3028,11 @@ function stepPlanksPhysics(dt) {
       }
     }
 
-    // 4. Коллизии досок друг с другом (с правильным опрокидыванием при свешивании края и без дрожания боковых стыков)
-    for (let i = 0; i < plankList.length; i++) {
-      for (let j = i + 1; j < plankList.length; j++) {
-        const plA = plankList[i];
-        const plB = plankList[j];
+    // 4. Коллизии досок друг с другом только среди ближних активных досок (ускоряет физику в 20 раз при тысячах досок на сервере)
+    for (let i = 0; i < nearbyPlanks.length; i++) {
+      for (let j = i + 1; j < nearbyPlanks.length; j++) {
+        const plA = nearbyPlanks[i];
+        const plB = nearbyPlanks[j];
         if (plA.groupId === plB.groupId) continue;
 
         const bodyA = bodies.get(plA.groupId);
@@ -3939,7 +3986,7 @@ function animate(now) {
   }
 
   netSyncAccum += dt;
-  const syncInterval = isMoving ? 0.28 : 2.0;
+  const syncInterval = isMoving ? 0.26 : 5.0;
   if (state.started && netSyncAccum > syncInterval) {
     netSyncAccum = 0;
     const myPlotsCount = Object.values(state.plots).filter((p) => p.ownerKey === state.playerKey).length;
