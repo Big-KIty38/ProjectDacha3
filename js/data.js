@@ -211,6 +211,15 @@ export function playSfx(type) {
       gain.gain.linearRampToValueAtTime(0.01, now + 0.15);
       osc.start(now);
       osc.stop(now + 0.15);
+    } else if (type === "saw") {
+      osc.type = "sawtooth";
+      osc.frequency.setValueAtTime(195, now);
+      osc.frequency.linearRampToValueAtTime(135, now + 0.09);
+      osc.frequency.linearRampToValueAtTime(220, now + 0.18);
+      gain.gain.setValueAtTime(0.18, now);
+      gain.gain.linearRampToValueAtTime(0.01, now + 0.2);
+      osc.start(now);
+      osc.stop(now + 0.2);
     }
   } catch {}
 }

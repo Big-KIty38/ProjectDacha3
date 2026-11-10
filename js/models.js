@@ -477,6 +477,67 @@ export function createSntEntranceMeshes(layout) {
   bazaar.add(bazBase, table, canopy, buyer, buyerHead, bazBadge);
   group.add(bazaar);
 
+  // 4. Большой металлический мусорный контейнер перед въездом в садоводство (для утилизации ненужных досок и обрезков)
+  if (layout.dumpsterPos) {
+    const dumpY = getTerrainHeight(layout.dumpsterPos.x, layout.dumpsterPos.z);
+    const dumpster = new THREE.Group();
+    dumpster.position.set(layout.dumpsterPos.x, dumpY, layout.dumpsterPos.z);
+
+    const pad = new THREE.Mesh(new THREE.BoxGeometry(3.8, 0.16, 2.8), MAT.foundation);
+    pad.position.y = 0.08;
+    dumpster.add(pad);
+
+    const greenSteel = new THREE.MeshStandardMaterial({ color: 0x1b5e20, roughness: 0.55, metalness: 0.45 });
+    const darkInside = new THREE.MeshStandardMaterial({ color: 0x1c262b, roughness: 0.85, metalness: 0.2 });
+    const yellowRim = new THREE.MeshStandardMaterial({ color: 0xffb300, roughness: 0.4, metalness: 0.3 });
+
+    // Дно и полые стенки бункера (чтобы внутрь было видно и удобно закидывать доски)
+    const bottom = new THREE.Mesh(new THREE.BoxGeometry(3.1, 0.14, 2.0), darkInside);
+    bottom.position.y = 0.22;
+    const frontWall = new THREE.Mesh(new THREE.BoxGeometry(3.1, 1.25, 0.12), greenSteel);
+    frontWall.position.set(0, 0.85, 0.94);
+    const backWall = new THREE.Mesh(new THREE.BoxGeometry(3.1, 1.45, 0.12), greenSteel);
+    backWall.position.set(0, 0.95, -0.94);
+    const leftWall = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1.35, 2.0), greenSteel);
+    leftWall.position.set(-1.49, 0.9, 0);
+    const rightWall = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1.35, 2.0), greenSteel);
+    rightWall.position.set(1.49, 0.9, 0);
+
+    // Жёлтая окантовка по бортам
+    const rimFront = new THREE.Mesh(new THREE.BoxGeometry(3.2, 0.09, 0.16), yellowRim);
+    rimFront.position.set(0, 1.48, 0.94);
+    const rimBack = new THREE.Mesh(new THREE.BoxGeometry(3.2, 0.09, 0.16), yellowRim);
+    rimBack.position.set(0, 1.68, -0.94);
+
+    // Табличка на переднем борту
+    const frontTex = makeTextCanvas(
+      [
+        { text: "🗑️ ТКО • МУСОР", font: "bold 24px Segoe UI", color: "#fffde7" },
+        { text: "СБРОС ДОСОК И ОБРЕЗКОВ", font: "bold 14px Segoe UI", color: "#ffd54f" }
+      ],
+      { width: 280, height: 80, bg: "#1b5e20", border: "#ffb300" }
+    );
+    const frontSign = new THREE.Mesh(
+      new THREE.PlaneGeometry(2.1, 0.6),
+      new THREE.MeshBasicMaterial({ map: frontTex })
+    );
+    frontSign.position.set(0, 0.88, 1.01);
+
+    const dumpBadge = makeFloatingBadge(
+      [
+        { text: "🗑️ МУСОРНЫЙ КОНТЕЙНЕР", font: "bold 20px Segoe UI", color: "#fffde7" },
+        { text: "Перенесите сюда ненужные доски — они исчезнут", font: "bold 13px Segoe UI", color: "#ffd54f" }
+      ],
+      4.9,
+      1.2,
+      { bg: "rgba(24, 58, 28, 0.94)", border: "#ffb300" }
+    );
+    dumpBadge.position.set(0, 3.1, 0);
+
+    dumpster.add(bottom, frontWall, backWall, leftWall, rightWall, rimFront, rimBack, frontSign, dumpBadge);
+    group.add(dumpster);
+  }
+
   return group;
 }
 
@@ -838,6 +899,30 @@ export function buildHeldItemMesh(heldId = "axe", hasSteelAxe = false, forFirstP
     handle.add(striker);
 
     group.add(handle);
+  } else if (heldId === "saw") {
+    // 3D-модель ручной ножовки по дереву с зубьями
+    const gripMat = new THREE.MeshStandardMaterial({ color: 0xd84315, roughness: 0.45, depthTest: dt });
+    const grip = new THREE.Mesh(new THREE.BoxGeometry(0.036, 0.14, 0.11), gripMat);
+    grip.position.set(0, 0.08, 0.02);
+    grip.rotation.x = 0.22;
+    grip.renderOrder = ro;
+
+    const blade = new THREE.Mesh(new THREE.BoxGeometry(0.008, 0.085, 0.46), steelMat);
+    blade.position.set(0, 0.02, -0.25);
+    blade.renderOrder = ro + 1;
+    grip.add(blade);
+
+    // Зубья пилы вдоль нижней кромки полотна
+    const teethMat = new THREE.MeshStandardMaterial({ color: 0xffffff, metalness: 0.85, roughness: 0.18, depthTest: dt });
+    for (let i = 0; i < 8; i++) {
+      const tooth = new THREE.Mesh(new THREE.ConeGeometry(0.012, 0.024, 4), teethMat);
+      tooth.rotation.x = Math.PI;
+      tooth.position.set(0, -0.05, -0.06 - i * 0.05);
+      tooth.renderOrder = ro + 1;
+      grip.add(tooth);
+    }
+
+    group.add(grip);
   } else if (heldId === "nails") {
     // Связка строительных гвоздей со шляпками в ладони
     const nailOffsets = [
@@ -1155,6 +1240,9 @@ export function createPhysicalPlankMesh(plankData) {
 
   group.userData = {
     plankId: plankData.id,
+    w,
+    h,
+    d,
     boardMesh,
     boardMat,
     nailsHolder: null

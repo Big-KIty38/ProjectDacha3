@@ -120,6 +120,7 @@ export function getChunkLayout(cx, cz) {
       : `СНТ «${SNT_TITLES[idx]}${regionNum > 1 ? "-" + regionNum : ""}»`;
 
   const archPos = { x: centerX, z: centerZ + 46 };
+  const dumpsterPos = { x: centerX + 9.2, z: centerZ + 48.5 };
   const shopPos = { x: centerX - 18.5, z: centerZ + 56 };
   const bazaarPos = { x: centerX + 18.5, z: centerZ + 56 };
 
@@ -223,6 +224,7 @@ export function getChunkLayout(cx, cz) {
     centerZ,
     sntName,
     archPos,
+    dumpsterPos,
     shopPos,
     bazaarPos,
     plots,

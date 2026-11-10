@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { Peer } from "peerjs";
 import mqtt from "mqtt";
 import { generateSecretKey, finalizeEvent } from "nostr-tools/pure";
-import { CHUNK_SIZE, getTerrainHeight, getChunkLayout } from "./world.js?v=16";
+import { CHUNK_SIZE, getTerrainHeight, getChunkLayout } from "./world.js?v=17";
 import {
   ITEMS,
   CROPS,
@@ -11,7 +11,7 @@ import {
   SHOP_GOODS,
   BAZAAR_PRICES,
   playSfx
-} from "./data.js?v=16";
+} from "./data.js?v=17";
 import {
   createTerrainChunkMesh,
   createResourceMesh,
@@ -28,7 +28,7 @@ import {
   rebuildPlankNailsMesh,
   createSingleNailMesh,
   animatePlayerMesh
-} from "./models.js?v=16";
+} from "./models.js?v=17";
 
 const savedProfile = JSON.parse(localStorage.getItem("project_dacha3_profile_v1") || "null");
 
@@ -40,7 +40,7 @@ const state = {
   money: savedProfile?.money ?? 500,
   hunger: savedProfile?.hunger ?? 100,
   energy: savedProfile?.energy ?? 100,
-  tools: savedProfile?.tools || { axe: false, hammer: true, watering_can: false },
+  tools: savedProfile?.tools || { axe: false, hammer: true, saw: true, watering_can: false },
   heldItem: savedProfile?.heldItem || "axe",
   inv: savedProfile?.inv || {
     wood: 0,
@@ -116,6 +116,7 @@ if (!savedProfile?.plankSystemV9) {
   }
 }
 state.tools.hammer = true;
+state.tools.saw = true;
 
 function saveLocalProfile() {
   try {
@@ -198,6 +199,14 @@ nailPreviewGroup.add(nailPreviewInner);
 nailPreviewGroup.visible = false;
 scene.add(nailPreviewGroup);
 
+// Красная линия распила на доске при наведении Пилой
+const sawCutPreviewMesh = new THREE.Mesh(
+  new THREE.BoxGeometry(0.022, 0.145, 0.385),
+  new THREE.MeshBasicMaterial({ color: 0xff3d00, transparent: true, opacity: 0.82 })
+);
+sawCutPreviewMesh.visible = false;
+scene.add(sawCutPreviewMesh);
+
 const plankPreviewMesh = createPhysicalPlankMesh({ id: "ghost_plank", w: 2.4, h: 0.12, d: 0.36, x: 0, y: 0, z: 0, qx: 0, qy: 0, qz: 0, qw: 1, nails: [] });
 plankPreviewMesh.traverse((c) => {
   if (c.isMesh && c.material) {
@@ -250,6 +259,16 @@ function resolveCollisions(nx, nz) {
       if (Math.abs(dx) < 3.5 && Math.abs(dz) < 2.6) {
         const penX = 3.5 - Math.abs(dx);
         const penZ = 2.6 - Math.abs(dz);
+        if (penX < penZ) nx += dx >= 0 ? penX : -penX;
+        else nz += dz >= 0 ? penZ : -penZ;
+      }
+    }
+    if (ch.layout.dumpsterPos) {
+      const dx = nx - ch.layout.dumpsterPos.x;
+      const dz = nz - ch.layout.dumpsterPos.z;
+      if (Math.abs(dx) < 1.95 && Math.abs(dz) < 1.35) {
+        const penX = 1.95 - Math.abs(dx);
+        const penZ = 1.35 - Math.abs(dz);
         if (penX < penZ) nx += dx >= 0 ? penX : -penX;
         else nz += dz >= 0 ? penZ : -penZ;
       }
@@ -1258,6 +1277,7 @@ export function getHeldItemTitle(id = state.heldItem) {
   if (id === "plank") return `🪵 Доска (${state.inv.plank || 0} шт. • ЛКМ — поставить • [R] — повернуть)`;
   if (id === "nails") return `🔩 Гвозди (${state.inv.nails || 0} шт. • ЛКМ по доске — воткнуть гвоздь)`;
   if (id === "hammer") return "🔨 Молоток (ЛКМ по гвоздю — забивать в доску и сбивать доски)";
+  if (id === "saw") return "🪚 Пила-ножовка (ЛКМ по доске — отпилить часть доски по красной метке)";
   if (id === "axe") return state.tools.axe ? "🪓 Стальной топор (x2 дерево)" : "🪓 Топор дачника";
   if (id === "watering_can") return "🚿 Садовая лейка";
   if (ITEMS[id]) {
@@ -1274,6 +1294,7 @@ function getHotbarSlots() {
     { id: "plank", icon: "🪵", name: "Доска", count: state.inv.plank || 0, kind: "item" },
     { id: "nails", icon: "🔩", name: "Гвозди", count: state.inv.nails || 0, kind: "item" },
     { id: "hammer", icon: "🔨", name: "Молоток", count: null, kind: "tool" },
+    { id: "saw", icon: "🪚", name: "Пила", count: null, kind: "tool" },
     { id: "axe", icon: "🪓", name: state.tools.axe ? "Сталь. топор" : "Топор", count: null, kind: "tool" }
   ];
   if (state.tools.watering_can) {
@@ -1396,7 +1417,8 @@ function openInventoryModal() {
   const baseTools = [
     { id: "hand", icon: "✋", name: "Пустая рука", desc: "Для сбора ягод, камней и ухода за огородом." },
     { id: "axe", icon: "🪓", name: state.tools.axe ? "Стальной топор (x2 дерево)" : "Топор дачника", desc: "Держите в руке [2], чтобы рубить берёзы и сосны." },
-    { id: "hammer", icon: "🔨", name: "Строительный молоток", desc: "Держите в руке [3] для постройки домов, заборов и грядок на участке." }
+    { id: "hammer", icon: "🔨", name: "Строительный молоток", desc: "Держите в руке [4] для забивания гвоздей и сбивания досок." },
+    { id: "saw", icon: "🪚", name: "Пила-ножовка по дереву", desc: "Держите в руке [5] и нажмите ЛКМ по доске, чтобы отпилить от неё часть нужной длины." }
   ];
   if (state.tools.watering_can) {
     baseTools.push({ id: "watering_can", icon: "🚿", name: "Садовая лейка", desc: "Автоматический полив при посадке семян." });
@@ -1749,6 +1771,12 @@ function exitBuildMode() {
 function spawnOrUpdatePlankMesh(plank) {
   if (!plank || !plank.id) return;
   let mesh = plankMeshes.get(plank.id);
+  const targetW = plank.w || 2.4;
+  if (mesh && Math.abs((mesh.userData.w || 2.4) - targetW) > 0.001) {
+    planksRoot.remove(mesh);
+    plankMeshes.delete(plank.id);
+    mesh = null;
+  }
   if (!mesh) {
     mesh = createPhysicalPlankMesh(plank);
     planksRoot.add(mesh);
@@ -2277,6 +2305,137 @@ function hammerNailAtCrosshairAction() {
 
   saveWorldPlanks();
   broadcastNetworkPacket({ type: "plank_updated", plank }, true);
+}
+
+// Распил доски Пилой по точке прицела (отпиливает часть доски, делая её короче)
+function sawPlankAtCrosshairAction() {
+  const surf = raycastPlankSurface(5.8);
+  if (!surf || !surf.plank) {
+    state.workTimer = 0.25;
+    showToast("🪚 Наведите прицел на доску и нажмите ЛКМ, чтобы отпилить часть!");
+    return;
+  }
+
+  const plank = surf.plank;
+  const w = plank.w || 2.4;
+  if (w <= 0.32) {
+    showToast("⚠️ Эта доска уже слишком короткая для распила (менее 32 см)!");
+    return;
+  }
+
+  const cutX = surf.localPoint.x;
+  const halfW = w * 0.5;
+  const leftLen = halfW + cutX;
+  const rightLen = halfW - cutX;
+
+  if (leftLen < 0.14 || rightLen < 0.14) {
+    showToast("⚠️ Отступите хотя бы 15 см от края доски для распила!");
+    return;
+  }
+
+  const q = new THREE.Quaternion(plank.qx || 0, plank.qy || 0, plank.qz || 0, plank.qw ?? 1).normalize();
+  const localAxisX = new THREE.Vector3(1, 0, 0).applyQuaternion(q);
+  const origCenter = new THREE.Vector3(plank.x, plank.y, plank.z);
+  const origNails = Array.isArray(plank.nails) ? plank.nails : [];
+
+  // Определяем основную (бОльшую) часть и отпиленный кусок
+  const keepLeft = leftLen >= rightLen;
+  const mainLen = +(keepLeft ? leftLen : rightLen).toFixed(3);
+  const offLen = +(keepLeft ? rightLen : leftLen).toFixed(3);
+
+  // Локальные центры обеих половин вдоль оси X исходной доски
+  const leftCenterOffset = -halfW + leftLen * 0.5;
+  const rightCenterOffset = halfW - rightLen * 0.5;
+  const mainOffset = keepLeft ? leftCenterOffset : rightCenterOffset;
+  const offOffset = keepLeft ? rightCenterOffset : leftCenterOffset;
+
+  const mainPos = origCenter.clone().addScaledVector(localAxisX, mainOffset);
+  plank.w = mainLen;
+  plank.x = +mainPos.x.toFixed(4);
+  plank.y = +mainPos.y.toFixed(4);
+  plank.z = +mainPos.z.toFixed(4);
+  plank.vx = 0;
+  plank.vy = 0;
+  plank.vz = 0;
+  plank.wx = 0;
+  plank.wy = 0;
+  plank.wz = 0;
+
+  // Пересчитываем координаты гвоздей, оставшихся на основной части
+  const mainNails = [];
+  const offNails = [];
+  for (const nl of origNails) {
+    const inLeft = (nl.lx || 0) <= cutX;
+    if ((keepLeft && inLeft) || (!keepLeft && !inLeft)) {
+      mainNails.push({
+        ...nl,
+        lx: +((nl.lx || 0) - mainOffset).toFixed(4)
+      });
+    } else {
+      offNails.push({
+        ...nl,
+        lx: +((nl.lx || 0) - offOffset).toFixed(4),
+        weldedToPlankId: null
+      });
+    }
+  }
+  plank.nails = mainNails;
+  spawnOrUpdatePlankMesh(plank);
+
+  state.workTimer = 0.38;
+  playSfx("saw");
+  showToast(`🪚 Отпилено ${offLen.toFixed(2)} м! Новая длина доски: ${mainLen.toFixed(2)} м.`);
+  saveWorldPlanks();
+  broadcastNetworkPacket({ type: "plank_updated", plank }, true);
+}
+
+// Проверка попадания досок внутрь мусорного контейнера перед СНТ (авто-удаление ненужных досок)
+function checkDumpsterPlankDisposal() {
+  if (loadedChunks.size === 0) return;
+  const toDeleteIds = new Set();
+
+  for (const pl of Object.values(state.planks)) {
+    for (const ch of loadedChunks.values()) {
+      const dp = ch.layout.dumpsterPos;
+      if (!dp) continue;
+      const dx = Math.abs(pl.x - dp.x);
+      const dz = Math.abs(pl.z - dp.z);
+      if (dx < 1.62 && dz < 1.08) {
+        const dumpY = getTerrainHeight(dp.x, dp.z);
+        if (pl.y >= dumpY - 0.3 && pl.y <= dumpY + 2.15) {
+          // Если доска входила в схваченную группу — удаляем всю принесённую конструкцию/доску
+          const gid = pl.groupId || `grp_${pl.id}`;
+          for (const member of Object.values(state.planks)) {
+            if ((member.groupId || `grp_${member.id}`) === gid) {
+              toDeleteIds.add(member.id);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (toDeleteIds.size > 0) {
+    if (grabState.active) {
+      for (const m of grabState.members) {
+        if (toDeleteIds.has(m.id)) {
+          grabState.active = false;
+          grabState.groupId = null;
+          grabState.members = [];
+          break;
+        }
+      }
+    }
+    for (const id of toDeleteIds) {
+      removePlankById(id, true);
+    }
+    playSfx("chop");
+    showToast(
+      toDeleteIds.size > 1
+        ? `🗑️ Ненужные доски (${toDeleteIds.size} шт.) выброшены в мусорный контейнер!`
+        : "🗑️ Ненужная доска выброшена в мусорный контейнер!"
+    );
+  }
 }
 
 // ==========================================
@@ -3075,6 +3234,7 @@ window.addEventListener("keydown", (e) => {
     if (state.heldItem === "plank") placePhysicalPlankAction();
     else if (state.heldItem === "nails") placeNailAtCrosshairAction();
     else if (state.heldItem === "hammer") hammerNailAtCrosshairAction();
+    else if (state.heldItem === "saw") sawPlankAtCrosshairAction();
     else executeInteraction(findNearestInteractable());
   } else if (k === "KeyI" || k === "Tab") { e.preventDefault(); openInventoryModal(); }
   else if (k === "KeyF" && !grabState.active) eatFoodAction();
@@ -3167,6 +3327,8 @@ window.addEventListener("mouseup", (e) => {
       placeNailAtCrosshairAction();
     } else if (state.heldItem === "hammer") {
       hammerNailAtCrosshairAction();
+    } else if (state.heldItem === "saw") {
+      sawPlankAtCrosshairAction();
     } else {
       const nearest = findNearestInteractable();
       if (nearest) executeInteraction(nearest);
@@ -3381,6 +3543,11 @@ function renderMinimap() {
     const [bzX, bzZ] = toScreen(ch.layout.bazaarPos.x, ch.layout.bazaarPos.z);
     mmCtx.fillStyle = "#ff7043";
     mmCtx.fillRect(bzX - 4, bzZ - 4, 8, 8);
+    if (ch.layout.dumpsterPos) {
+      const [dmX, dmZ] = toScreen(ch.layout.dumpsterPos.x, ch.layout.dumpsterPos.z);
+      mmCtx.fillStyle = "#66bb6a";
+      mmCtx.fillRect(dmX - 3, dmZ - 3, 6, 6);
+    }
   }
 
   for (const rp of state.remotePlayers.values()) {
@@ -3607,6 +3774,7 @@ function animate(now) {
   if (state.started) {
     updateHandGrab(dt);
     stepPlanksPhysics(dt);
+    checkDumpsterPlankDisposal();
 
     if (state.heldItem === "plank" && (state.inv.plank || 0) > 0 && modalBackdrop.style.display !== "flex") {
       const tr = getPlankSpawnTransform();
@@ -3628,6 +3796,30 @@ function animate(now) {
       }
     } else {
       nailPreviewGroup.visible = false;
+    }
+
+    if (state.heldItem === "saw" && modalBackdrop.style.display !== "flex") {
+      const surf = raycastPlankSurface(5.8);
+      if (surf && surf.plank) {
+        const pl = surf.plank;
+        const w = pl.w || 2.4;
+        const cutX = surf.localPoint.x;
+        if (w > 0.32 && Math.abs(cutX) <= w * 0.5 - 0.14) {
+          const q = new THREE.Quaternion(pl.qx || 0, pl.qy || 0, pl.qz || 0, pl.qw ?? 1).normalize();
+          const cutWorldPos = new THREE.Vector3(pl.x, pl.y, pl.z).add(
+            new THREE.Vector3(cutX, 0, 0).applyQuaternion(q)
+          );
+          sawCutPreviewMesh.position.copy(cutWorldPos);
+          sawCutPreviewMesh.quaternion.copy(q);
+          sawCutPreviewMesh.visible = true;
+        } else {
+          sawCutPreviewMesh.visible = false;
+        }
+      } else {
+        sawCutPreviewMesh.visible = false;
+      }
+    } else {
+      sawCutPreviewMesh.visible = false;
     }
   }
 
