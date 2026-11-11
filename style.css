@@ -4,6 +4,7 @@
   padding: 0;
   user-select: none;
   -webkit-user-select: none;
+  -webkit-touch-callout: none;
   font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
 }
 
@@ -13,6 +14,7 @@ html, body {
   overflow: hidden;
   background: #111b14;
   color: #f4f7f2;
+  overscroll-behavior: none;
 }
 
 #game-canvas {
@@ -22,6 +24,7 @@ html, body {
   height: 100vh;
   display: block;
   z-index: 1;
+  touch-action: none;
 }
 
 /* LOGIN OVERLAY */
@@ -35,16 +38,22 @@ html, body {
   align-items: center;
   justify-content: center;
   padding: 16px;
+  overflow-y: auto;
+  touch-action: pan-y;
+  -webkit-overflow-scrolling: touch;
 }
 
 .login-card {
   width: 100%;
   max-width: 480px;
+  max-height: 94vh;
+  overflow-y: auto;
   background: linear-gradient(165deg, rgba(32, 56, 38, 0.97), rgba(18, 32, 22, 0.98));
   border: 2px solid #558b2f;
   border-radius: 18px;
-  padding: 26px 28px;
+  padding: 24px 26px;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.7);
+  margin: auto;
 }
 
 .login-badge {
@@ -71,11 +80,11 @@ html, body {
   font-size: 13.5px;
   color: #c5e1a5;
   line-height: 1.45;
-  margin-bottom: 18px;
+  margin-bottom: 16px;
 }
 
 .form-group {
-  margin-bottom: 16px;
+  margin-bottom: 14px;
 }
 
 .form-group label {
@@ -107,6 +116,7 @@ html, body {
 .color-picker-row {
   display: flex;
   gap: 10px;
+  flex-wrap: wrap;
 }
 
 .color-swatch {
@@ -128,11 +138,11 @@ html, body {
   background: rgba(0, 0, 0, 0.28);
   border: 1px solid rgba(139, 195, 74, 0.25);
   border-radius: 12px;
-  padding: 12px 14px;
+  padding: 11px 13px;
   font-size: 12.5px;
   color: #e8f5e9;
-  line-height: 1.55;
-  margin-bottom: 18px;
+  line-height: 1.5;
+  margin-bottom: 16px;
 }
 
 .starter-features b {
@@ -175,6 +185,7 @@ html, body {
   flex-direction: column;
   gap: 8px;
   pointer-events: auto;
+  z-index: 25;
 }
 
 .player-card {
@@ -212,6 +223,7 @@ html, body {
   border: 1px solid #66bb6a;
   color: #a5d6a7;
   font-weight: 600;
+  white-space: nowrap;
 }
 
 .stats-row {
@@ -256,9 +268,10 @@ html, body {
 }
 
 .bar-label {
-  width: 76px;
+  width: 78px;
   color: #cfd8dc;
   font-weight: 600;
+  white-space: nowrap;
 }
 
 .bar-track {
@@ -284,6 +297,12 @@ html, body {
   background: linear-gradient(90deg, #29b6f6, #66bb6a);
 }
 
+.bar-pct {
+  width: 32px;
+  text-align: right;
+  font-size: 11px;
+}
+
 .tools-badges {
   display: flex;
   gap: 6px;
@@ -298,6 +317,40 @@ html, body {
   background: rgba(255, 255, 255, 0.08);
   color: #dce775;
   border: 1px solid rgba(220, 231, 117, 0.3);
+}
+
+/* MOBILE QUICK TOGGLES (CHAT / ONLINE) */
+.mobile-left-toggles {
+  display: none;
+  gap: 6px;
+}
+
+.hud-mini-btn {
+  position: relative;
+  background: rgba(20, 38, 24, 0.9);
+  border: 1px solid rgba(129, 199, 132, 0.5);
+  color: #fffde7;
+  padding: 4px 10px;
+  border-radius: 8px;
+  font-size: 11.5px;
+  font-weight: 700;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.hud-mini-btn.active {
+  background: #2e7d32;
+  border-color: #ffd54f;
+}
+
+.unread-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #ff5252;
+  display: inline-block;
 }
 
 /* ONLINE PLAYERS LIST */
@@ -324,6 +377,7 @@ html, body {
   gap: 3px;
   max-height: 95px;
   overflow-y: auto;
+  touch-action: pan-y;
 }
 
 .online-item {
@@ -343,6 +397,7 @@ html, body {
   align-items: flex-end;
   gap: 8px;
   pointer-events: auto;
+  z-index: 25;
 }
 
 .minimap-wrap {
@@ -352,6 +407,7 @@ html, body {
   padding: 6px;
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
   text-align: center;
+  cursor: pointer;
 }
 
 #minimap-canvas {
@@ -386,6 +442,7 @@ html, body {
   font-weight: 700;
   cursor: pointer;
   transition: background 0.15s, transform 0.1s;
+  white-space: nowrap;
 }
 
 .hud-btn:hover {
@@ -402,18 +459,22 @@ html, body {
   margin-right: 4px;
 }
 
+.btn-lbl-short {
+  display: none;
+}
+
 /* INTERACTION PROMPT */
 #interact-prompt {
   position: absolute;
-  bottom: 130px;
+  bottom: 118px;
   left: 50%;
   transform: translateX(-50%);
   background: rgba(15, 30, 18, 0.92);
   border: 2px solid #ffd54f;
   border-radius: 14px;
-  padding: 10px 18px;
+  padding: 9px 16px;
   color: #fffde7;
-  font-size: 14.5px;
+  font-size: 14px;
   font-weight: 700;
   box-shadow: 0 8px 26px rgba(0, 0, 0, 0.6);
   pointer-events: auto;
@@ -421,6 +482,7 @@ html, body {
   display: none;
   text-align: center;
   max-width: 90vw;
+  z-index: 32;
 }
 
 #interact-prompt .sub-hint {
@@ -447,21 +509,37 @@ html, body {
   display: none;
   text-align: center;
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+  z-index: 35;
 }
 
 /* INVENTORY BAR BOTTOM */
 .hud-bottom {
   position: fixed;
-  bottom: 14px;
+  bottom: 12px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 30;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   pointer-events: auto;
   max-width: 96vw;
+}
+
+#held-item-banner {
+  background: rgba(15, 30, 18, 0.92);
+  border: 1.5px solid #ffd54f;
+  color: #fffde7;
+  padding: 4px 14px;
+  border-radius: 99px;
+  font-size: 12.5px;
+  font-weight: 700;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+  max-width: 92vw;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 #inventory-bar {
@@ -474,23 +552,51 @@ html, body {
   border-radius: 13px;
   padding: 6px 10px;
   backdrop-filter: blur(6px);
+  touch-action: pan-x;
+  -webkit-overflow-scrolling: touch;
+}
+
+#inventory-bar::-webkit-scrollbar {
+  display: none;
 }
 
 .inv-slot {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 5px;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 8px;
-  padding: 4px 8px;
-  font-size: 12px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1.5px solid rgba(255, 255, 255, 0.16);
+  border-radius: 10px;
+  padding: 6px 10px;
+  font-size: 12.5px;
+  color: #eceff1;
   cursor: pointer;
-  transition: background 0.12s;
+  transition: all 0.14s ease;
+  white-space: nowrap;
 }
 
 .inv-slot:hover {
   background: rgba(129, 199, 132, 0.22);
+}
+
+.inv-slot.active {
+  background: rgba(102, 187, 106, 0.28);
+  border-color: #ffd54f;
+  box-shadow: 0 0 12px rgba(255, 213, 79, 0.45);
+  transform: translateY(-2px);
+  color: #fffde7;
+  font-weight: 700;
+}
+
+.inv-slot .slot-key {
+  background: rgba(0, 0, 0, 0.55);
+  color: #dce775;
+  font-size: 10.5px;
+  font-weight: 800;
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid rgba(220, 231, 117, 0.3);
 }
 
 .inv-slot .cnt {
@@ -511,8 +617,8 @@ html, body {
   position: absolute;
   bottom: 12px;
   left: 14px;
-  width: 290px;
-  background: rgba(14, 26, 17, 0.82);
+  width: 280px;
+  background: rgba(14, 26, 17, 0.84);
   border: 1px solid rgba(129, 199, 132, 0.35);
   border-radius: 12px;
   padding: 8px;
@@ -520,16 +626,41 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  z-index: 26;
+}
+
+.chat-mobile-header {
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  font-weight: 700;
+  color: #a5d6a7;
+  border-bottom: 1px solid rgba(129, 199, 132, 0.25);
+  padding-bottom: 4px;
+}
+
+.chat-mobile-header button {
+  background: rgba(255, 255, 255, 0.12);
+  border: none;
+  color: #fff;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
 }
 
 #chat-messages {
-  height: 110px;
+  height: 105px;
   overflow-y: auto;
   font-size: 12px;
   display: flex;
   flex-direction: column;
   gap: 4px;
   padding-right: 4px;
+  touch-action: pan-y;
+  -webkit-overflow-scrolling: touch;
 }
 
 .chat-line {
@@ -570,27 +701,27 @@ html, body {
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 50;
+  z-index: 60;
   background: rgba(6, 14, 8, 0.72);
   backdrop-filter: blur(4px);
   display: none;
   align-items: center;
   justify-content: center;
-  padding: 16px;
+  padding: 14px;
   pointer-events: auto;
 }
 
 .modal-window {
   width: 100%;
   max-width: 680px;
-  max-height: 84vh;
+  max-height: 88vh;
   background: linear-gradient(165deg, #1b3020, #122116);
   border: 2px solid #66bb6a;
   border-radius: 18px;
-  padding: 20px;
+  padding: 18px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.75);
 }
 
@@ -599,11 +730,11 @@ html, body {
   align-items: center;
   justify-content: space-between;
   border-bottom: 1px solid rgba(129, 199, 132, 0.25);
-  padding-bottom: 10px;
+  padding-bottom: 8px;
 }
 
 .modal-header h2 {
-  font-size: 20px;
+  font-size: 19px;
   color: #fffde7;
 }
 
@@ -616,14 +747,17 @@ html, body {
   border-radius: 8px;
   font-size: 16px;
   cursor: pointer;
+  flex-shrink: 0;
 }
 
 .modal-body {
   overflow-y: auto;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
   gap: 10px;
   padding-right: 4px;
+  touch-action: pan-y;
+  -webkit-overflow-scrolling: touch;
 }
 
 .card-item {
@@ -639,7 +773,7 @@ html, body {
 
 .card-title {
   font-weight: 700;
-  font-size: 14.5px;
+  font-size: 14px;
   color: #fffde7;
 }
 
@@ -680,27 +814,29 @@ html, body {
 /* TOAST NOTIFICATIONS */
 #toast-container {
   position: fixed;
-  top: 72px;
+  top: 56px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 80;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   pointer-events: none;
+  max-width: 92vw;
 }
 
 .toast-msg {
   background: rgba(20, 42, 24, 0.94);
   border: 1.5px solid #aed581;
   color: #fffde7;
-  padding: 8px 16px;
+  padding: 7px 14px;
   border-radius: 99px;
-  font-size: 13.5px;
+  font-size: 13px;
   font-weight: 600;
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
   animation: fadeToast 2.8s forwards;
+  text-align: center;
 }
 
 @keyframes fadeToast {
@@ -708,17 +844,6 @@ html, body {
   12% { opacity: 1; transform: translateY(0); }
   85% { opacity: 1; transform: translateY(0); }
   100% { opacity: 0; transform: translateY(-8px); }
-}
-
-@media (max-width: 760px) {
-  .chat-panel {
-    width: 220px;
-    bottom: 92px;
-  }
-  #minimap-canvas {
-    width: 120px;
-    height: 120px;
-  }
 }
 
 /* ПРИЦЕЛ ОТ ПЕРВОГО ЛИЦА */
@@ -752,47 +877,639 @@ html, body {
   height: 14px;
 }
 
-#held-item-banner {
-  background: rgba(15, 30, 18, 0.92);
-  border: 1.5px solid #ffd54f;
-  color: #fffde7;
-  padding: 4px 14px;
-  border-radius: 99px;
-  font-size: 12.5px;
-  font-weight: 700;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+/* =========================================================
+   СЕНСОРНОЕ УПРАВЛЕНИЕ (ДЖОЙСТИК И КНОПКИ ДЛЯ ТЕЛЕФОНОВ)
+   ========================================================= */
+#mobile-controls {
+  display: none;
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 34;
+  touch-action: none;
 }
 
-.inv-slot {
+body.touch-mode #mobile-controls {
+  display: block;
+}
+
+.mob-left-cluster {
+  position: absolute;
+  left: 14px;
+  bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.mob-aux-btn {
+  background: rgba(18, 36, 22, 0.85);
+  border: 1.5px solid rgba(129, 199, 132, 0.55);
+  color: #e8f5e9;
+  padding: 5px 14px;
+  border-radius: 99px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.45);
+  touch-action: none;
+}
+
+.mob-aux-btn.active {
+  background: rgba(255, 179, 0, 0.32);
+  border-color: #ffd54f;
+  color: #fffde7;
+  box-shadow: 0 0 12px rgba(255, 213, 79, 0.5);
+}
+
+#mob-joystick-zone {
+  width: 114px;
+  height: 114px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  touch-action: none;
+}
+
+#mob-joystick-base {
+  width: 104px;
+  height: 104px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(28, 54, 34, 0.55) 0%, rgba(12, 24, 15, 0.78) 100%);
+  border: 2px solid rgba(129, 199, 132, 0.55);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5), inset 0 0 14px rgba(0, 0, 0, 0.45);
   position: relative;
   display: flex;
   align-items: center;
-  gap: 6px;
-  background: rgba(255, 255, 255, 0.07);
-  border: 1.5px solid rgba(255, 255, 255, 0.16);
-  border-radius: 10px;
-  padding: 6px 10px;
-  font-size: 12.5px;
-  color: #eceff1;
-  cursor: pointer;
-  transition: all 0.14s ease;
+  justify-content: center;
 }
 
-.inv-slot.active {
-  background: rgba(102, 187, 106, 0.28);
-  border-color: #ffd54f;
-  box-shadow: 0 0 12px rgba(255, 213, 79, 0.45);
-  transform: translateY(-2px);
-  color: #fffde7;
+#mob-joystick-knob {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 35%, #81c784, #2e7d32);
+  border: 2px solid #fffde7;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.6);
+  transform: translate(0px, 0px);
+  pointer-events: none;
+}
+
+/* Правый блок кнопок действий */
+.mob-right-cluster {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.mob-sec-row {
+  display: flex;
+  gap: 5px;
+  justify-content: flex-end;
+}
+
+.mob-sec-btn {
+  background: rgba(16, 32, 20, 0.88);
+  border: 1.5px solid rgba(129, 199, 132, 0.5);
+  color: #e8f5e9;
+  padding: 5px 9px;
+  border-radius: 9px;
+  font-size: 11px;
   font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.45);
+  touch-action: none;
+  white-space: nowrap;
 }
 
-.inv-slot .slot-key {
-  background: rgba(0, 0, 0, 0.55);
-  color: #dce775;
-  font-size: 10.5px;
+.mob-sec-btn:active {
+  background: #2e7d32;
+  border-color: #ffd54f;
+  transform: scale(0.95);
+}
+
+.mob-main-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.mob-action-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  border-radius: 50%;
+  cursor: pointer;
+  color: #fffde7;
   font-weight: 800;
-  padding: 1px 5px;
-  border-radius: 4px;
-  border: 1px solid rgba(220, 231, 117, 0.3);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.55);
+  touch-action: none;
+  transition: transform 0.08s, background 0.12s, border-color 0.12s;
+}
+
+.mob-action-btn:active {
+  transform: scale(0.93);
+}
+
+.mob-use-btn,
+.mob-jump-btn {
+  width: 54px;
+  height: 54px;
+  background: rgba(20, 42, 25, 0.88);
+  border: 2px solid rgba(129, 199, 132, 0.65);
+}
+
+.mob-use-btn.highlight {
+  background: rgba(245, 124, 0, 0.88);
+  border-color: #ffd54f;
+  box-shadow: 0 0 16px rgba(255, 213, 79, 0.65);
+}
+
+.mob-primary-btn {
+  width: 68px;
+  height: 68px;
+  background: linear-gradient(145deg, rgba(67, 160, 71, 0.92), rgba(27, 94, 32, 0.95));
+  border: 2.5px solid #ffd54f;
+}
+
+.mob-primary-btn.grabbing {
+  background: linear-gradient(145deg, rgba(239, 108, 0, 0.95), rgba(183, 28, 28, 0.95));
+  border-color: #fffde7;
+  box-shadow: 0 0 18px rgba(255, 183, 77, 0.75);
+}
+
+.mob-btn-icon {
+  font-size: 20px;
+  line-height: 1;
+}
+
+.mob-primary-btn .mob-btn-icon {
+  font-size: 24px;
+}
+
+.mob-btn-text {
+  font-size: 9.5px;
+  letter-spacing: 0.2px;
+}
+
+/* Панель вращения схваченной доски */
+.mob-grab-panel {
+  position: fixed;
+  bottom: 74px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 5px;
+  background: rgba(14, 28, 18, 0.94);
+  border: 1.5px solid #ffd54f;
+  border-radius: 12px;
+  padding: 5px 8px;
+  pointer-events: auto;
+  z-index: 38;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.6);
+  touch-action: none;
+  flex-wrap: nowrap;
+  max-width: 94vw;
+  overflow-x: auto;
+}
+
+.mob-grab-btn {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 213, 79, 0.45);
+  color: #fffde7;
+  padding: 5px 9px;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  touch-action: none;
+}
+
+.mob-grab-btn:active {
+  background: #ef6c00;
+  border-color: #fff;
+}
+
+/* =========================================================
+   АДАПТАЦИЯ ИНТЕРФЕЙСА ДЛЯ ТЕЛЕФОНОВ И ПЛАНШЕТОВ
+   (Как в горизонтальной, так и в вертикальной ориентации)
+   ========================================================= */
+@media (max-width: 960px), (max-height: 540px), (pointer: coarse) {
+  #login-overlay {
+    padding: 8px;
+    align-items: flex-start;
+  }
+
+  .login-card {
+    max-width: 540px;
+    padding: 14px 16px;
+    border-radius: 14px;
+    margin: auto;
+  }
+
+  .login-card h1 {
+    font-size: 21px;
+    margin-bottom: 4px;
+  }
+
+  .login-sub {
+    font-size: 12px;
+    margin-bottom: 10px;
+    line-height: 1.35;
+  }
+
+  .form-group {
+    margin-bottom: 10px;
+  }
+
+  .form-group label {
+    font-size: 11.5px;
+    margin-bottom: 4px;
+  }
+
+  .form-group input {
+    padding: 8px 11px;
+    font-size: 15px;
+  }
+
+  .color-swatch {
+    width: 30px;
+    height: 30px;
+  }
+
+  .starter-features {
+    padding: 8px 10px;
+    font-size: 11.5px;
+    line-height: 1.38;
+    margin-bottom: 10px;
+  }
+
+  .btn-start {
+    padding: 10px;
+    font-size: 15px;
+  }
+
+  /* Компактная левая верхняя карточка дачника */
+  .hud-top-left {
+    top: 6px;
+    left: 8px;
+    gap: 5px;
+  }
+
+  .player-card {
+    min-width: 0;
+    width: auto;
+    max-width: 235px;
+    padding: 6px 9px;
+    border-radius: 10px;
+  }
+
+  .player-header {
+    margin-bottom: 3px;
+    gap: 6px;
+  }
+
+  .player-name-badge {
+    font-size: 12.5px;
+  }
+
+  .net-pill {
+    font-size: 9.5px;
+    padding: 1px 6px;
+  }
+
+  .stats-row {
+    font-size: 11.5px;
+    gap: 6px;
+    margin-bottom: 4px;
+  }
+
+  .money-val {
+    font-size: 13px;
+  }
+
+  .location-val,
+  .tools-badges {
+    display: none !important;
+  }
+
+  .bars-wrap {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+  }
+
+  .bar-line {
+    gap: 4px;
+    font-size: 10.5px;
+  }
+
+  .bar-label {
+    width: auto;
+  }
+
+  .bar-lbl-text {
+    display: none;
+  }
+
+  .bar-track {
+    height: 7px;
+  }
+
+  .bar-pct {
+    width: 26px;
+    font-size: 10px;
+  }
+
+  .mobile-left-toggles {
+    display: flex;
+  }
+
+  /* Чат и список игроков по умолчанию свёрнуты в кнопки на телефонах */
+  .online-box {
+    display: none;
+    position: fixed;
+    top: 90px;
+    left: 8px;
+    z-index: 48;
+    background: rgba(12, 24, 15, 0.96);
+    border: 1.5px solid #66bb6a;
+    width: 235px;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.7);
+  }
+
+  .online-box.mob-open {
+    display: block;
+  }
+
+  .chat-panel {
+    display: none;
+    position: fixed;
+    top: 90px;
+    left: 8px;
+    bottom: auto;
+    width: 265px;
+    z-index: 49;
+    background: rgba(12, 24, 15, 0.96);
+    border: 1.5px solid #66bb6a;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.75);
+  }
+
+  .chat-panel.mob-open {
+    display: flex;
+  }
+
+  .chat-mobile-header {
+    display: flex;
+  }
+
+  #chat-messages {
+    height: 90px;
+  }
+
+  /* Компактная правая верхняя панель и миникарта */
+  .hud-top-right {
+    top: 6px;
+    right: 8px;
+    flex-direction: row-reverse;
+    align-items: flex-start;
+    gap: 6px;
+    max-width: calc(100vw - 250px);
+  }
+
+  .minimap-wrap {
+    padding: 3px;
+    border-radius: 10px;
+    flex-shrink: 0;
+  }
+
+  #minimap-canvas {
+    width: 62px;
+    height: 62px;
+    border-radius: 7px;
+  }
+
+  .minimap-caption,
+  .minimap-legend {
+    display: none;
+  }
+
+  .minimap-wrap.expanded #minimap-canvas {
+    width: 148px;
+    height: 148px;
+  }
+
+  .minimap-wrap.expanded .minimap-caption,
+  .minimap-wrap.expanded .minimap-legend {
+    display: block;
+  }
+
+  .action-buttons {
+    gap: 4px;
+    justify-content: flex-end;
+  }
+
+  .hud-btn {
+    padding: 5px 8px;
+    font-size: 11px;
+    border-radius: 8px;
+  }
+
+  .hud-btn kbd,
+  .btn-lbl-full {
+    display: none;
+  }
+
+  .btn-lbl-short {
+    display: inline;
+  }
+
+  /* Компактный хотбар в 1 ряд строго между левым джойстиком и правыми кнопками */
+  .hud-bottom {
+    bottom: 6px;
+    left: 136px;
+    right: 214px;
+    transform: none;
+    gap: 3px;
+    max-width: none;
+  }
+
+  #held-item-banner {
+    font-size: 11px;
+    padding: 2px 10px;
+  }
+
+  #inventory-bar {
+    flex-wrap: nowrap;
+    justify-content: flex-start;
+    overflow-x: auto;
+    max-width: 100%;
+    padding: 4px 6px;
+    gap: 4px;
+    border-radius: 10px;
+  }
+
+  .inv-slot {
+    padding: 4px 7px;
+    font-size: 11px;
+    border-radius: 8px;
+    flex-shrink: 0;
+  }
+
+  .inv-slot .slot-key {
+    font-size: 9.5px;
+    padding: 0 4px;
+  }
+
+  .controls-hint {
+    display: none !important;
+  }
+
+  #interact-prompt {
+    bottom: 64px;
+    padding: 6px 12px;
+    font-size: 12px;
+    border-radius: 10px;
+    max-width: min(380px, calc(100vw - 320px));
+  }
+
+  #interact-prompt .sub-hint {
+    font-size: 10.5px;
+  }
+
+  /* Модальные окна на телефоне */
+  .modal-backdrop {
+    padding: 8px;
+  }
+
+  .modal-window {
+    max-height: 92vh;
+    padding: 12px 14px;
+    border-radius: 14px;
+    gap: 8px;
+  }
+
+  .modal-header h2 {
+    font-size: 15.5px;
+  }
+
+  .modal-body {
+    grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+    gap: 8px;
+  }
+
+  .card-item {
+    padding: 9px 10px;
+    gap: 6px;
+  }
+
+  .card-title {
+    font-size: 13px;
+  }
+
+  .card-desc {
+    font-size: 11px;
+  }
+
+  .card-btn {
+    padding: 7px 10px;
+    font-size: 12px;
+  }
+}
+
+/* Вертикальная (портретная) ориентация узких экранов телефонов */
+@media (max-width: 600px) {
+  .hud-top-right {
+    max-width: calc(100vw - 190px);
+    flex-direction: column;
+    align-items: flex-end;
+  }
+
+  .player-card {
+    max-width: 175px;
+  }
+
+  .hud-bottom {
+    bottom: 6px;
+    left: 50%;
+    right: auto;
+    transform: translateX(-50%);
+    width: 96vw;
+    max-width: 96vw;
+  }
+
+  .mob-left-cluster {
+    left: 10px;
+    bottom: 68px;
+  }
+
+  .mob-right-cluster {
+    right: 10px;
+    bottom: 68px;
+  }
+
+  .mob-grab-panel {
+    bottom: 176px;
+  }
+
+  #interact-prompt {
+    bottom: 174px;
+    max-width: 90vw;
+  }
+}
+
+/* Компактное окно входа на невысоких экранах телефонов в горизонтальном режиме */
+@media (max-height: 460px) {
+  .login-card {
+    max-width: 620px;
+    padding: 10px 16px;
+  }
+  .login-badge {
+    margin-bottom: 3px;
+    font-size: 9.5px;
+    padding: 2px 8px;
+  }
+  .login-card h1 {
+    font-size: 18px;
+    margin-bottom: 2px;
+  }
+  .login-sub {
+    font-size: 11px;
+    margin-bottom: 6px;
+  }
+  .starter-features {
+    display: none;
+  }
+  .form-group {
+    margin-bottom: 6px;
+  }
+  .form-group input {
+    padding: 6px 10px;
+    font-size: 14px;
+  }
+  .color-swatch {
+    width: 26px;
+    height: 26px;
+  }
+  .btn-start {
+    padding: 8px;
+    font-size: 14px;
+  }
+  #reset-profile-btn {
+    margin-top: 5px !important;
+    padding: 4px !important;
+    font-size: 11px !important;
+  }
 }

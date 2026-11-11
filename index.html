@@ -2,16 +2,16 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <title>ProjectDacha3 — Мультиплеерная 3D Игра про Русские Садоводства</title>
-  <link rel="stylesheet" href="style.css?v=20" />
+  <link rel="stylesheet" href="style.css?v=21" />
   <script type="importmap">
     {
       "imports": {
-        "three": "./js/vendor/three.js?v=20",
-        "nostr-tools/pure": "./js/vendor/nostr-pure.js?v=20",
-        "peerjs": "./js/vendor/peerjs.js?v=20",
-        "mqtt": "./js/vendor/mqtt.js?v=20"
+        "three": "./js/vendor/three.js?v=21",
+        "nostr-tools/pure": "./js/vendor/nostr-pure.js?v=21",
+        "peerjs": "./js/vendor/peerjs.js?v=21",
+        "mqtt": "./js/vendor/mqtt.js?v=21"
       }
     }
   </script>
@@ -22,7 +22,7 @@
   <!-- ВХОД И ВЫБОР НИКА -->
   <div id="login-overlay">
     <div class="login-card">
-      <span class="login-badge">Мультиплеер • 3D от 1-го лица • Бесконечный мир СНТ</span>
+      <span class="login-badge">Мультиплеер • 3D от 1-го лица • ПК и Телефоны</span>
       <h1>🌲 Проект Дача 3D</h1>
       <p class="login-sub">
         Бесконечный русский лес с дорогами и садоводствами (СНТ). Покупай участки, руби деревья, собирай ягоды с кустов, перерабатывай ресурсы, строй дома и выращивай урожай!
@@ -80,14 +80,14 @@
 
         <div class="bars-wrap">
           <div class="bar-line">
-            <span class="bar-label">🍓 Сытость</span>
+            <span class="bar-label"><span class="bar-icon">🍓</span> <span class="bar-lbl-text">Сытость</span></span>
             <div class="bar-track"><div class="bar-fill hunger" id="bar-hunger" style="width:100%"></div></div>
-            <span id="val-hunger" style="width:32px;text-align:right;font-size:11px;">100%</span>
+            <span class="bar-pct" id="val-hunger">100%</span>
           </div>
           <div class="bar-line">
-            <span class="bar-label">⚡ Бодрость</span>
+            <span class="bar-label"><span class="bar-icon">⚡</span> <span class="bar-lbl-text">Бодрость</span></span>
             <div class="bar-track"><div class="bar-fill energy" id="bar-energy" style="width:100%"></div></div>
-            <span id="val-energy" style="width:32px;text-align:right;font-size:11px;">100%</span>
+            <span class="bar-pct" id="val-energy">100%</span>
           </div>
         </div>
 
@@ -96,7 +96,17 @@
         </div>
       </div>
 
-      <div class="online-box">
+      <!-- Кнопки быстрого открытия чата и списка игроков на мобильных -->
+      <div class="mobile-left-toggles" id="mobile-left-toggles">
+        <button class="hud-mini-btn" id="btn-toggle-chat" type="button">
+          💬 Чат <span id="chat-unread-dot" class="unread-dot" style="display:none;"></span>
+        </button>
+        <button class="hud-mini-btn" id="btn-toggle-online" type="button">
+          👥 Онлайн: <span id="mob-online-count">1</span>
+        </button>
+      </div>
+
+      <div class="online-box" id="online-box">
         <div class="online-title">
           <span>👥 Дачники на карте</span>
           <span id="online-count">1</span>
@@ -106,17 +116,20 @@
     </div>
 
     <div class="hud-top-right">
-      <div class="minimap-wrap">
+      <div class="minimap-wrap" id="minimap-wrap" title="Нажмите, чтобы свернуть/развернуть карту">
         <canvas id="minimap-canvas" width="180" height="180"></canvas>
         <div class="minimap-caption" id="minimap-coords">X: 0 • Z: 0 • Высота: 0.0м</div>
-        <div style="font-size:10.5px;color:#dce775;margin-top:2px;">🟨 Магазин • 🟧 Базар (у въезда в СНТ)</div>
+        <div class="minimap-legend" style="font-size:10.5px;color:#dce775;margin-top:2px;">🟨 Магазин • 🟧 Базар (у въезда в СНТ)</div>
       </div>
 
       <div class="action-buttons">
-        <button class="hud-btn" id="btn-inv"><kbd>I</kbd> 🎒 Инвентарь</button>
-        <button class="hud-btn" id="btn-eat"><kbd>F</kbd> 🍓 Поесть</button>
-        <button class="hud-btn" id="btn-craft"><kbd>C</kbd> 🪚 Переработка / Крафт</button>
-        <button class="hud-btn" id="btn-build"><kbd>B</kbd> 🏡 Стройка и Огород</button>
+        <button class="hud-btn" id="btn-inv" type="button"><kbd>I</kbd> 🎒 <span class="btn-lbl-full">Инвентарь</span><span class="btn-lbl-short">Рюкзак</span></button>
+        <button class="hud-btn" id="btn-eat" type="button"><kbd>F</kbd> 🍓 <span class="btn-lbl-full">Поесть</span><span class="btn-lbl-short">Еда</span></button>
+        <button class="hud-btn" id="btn-craft" type="button"><kbd>C</kbd> 🪚 <span class="btn-lbl-full">Переработка / Крафт</span><span class="btn-lbl-short">Крафт</span></button>
+        <button class="hud-btn" id="btn-build" type="button"><kbd>B</kbd> 🏡 <span class="btn-lbl-full">Стройка и Огород</span><span class="btn-lbl-short">Стройка</span></button>
+        <button class="hud-btn" id="btn-cam-view" type="button" title="Переключить вид от 1-го / 3-го лица [V]"><kbd>V</kbd> 👁️ <span class="btn-lbl-full">Вид</span><span class="btn-lbl-short">Вид</span></button>
+        <button class="hud-btn" id="btn-touch-toggle" type="button" title="Включить / скрыть сенсорные кнопки управления">📱</button>
+        <button class="hud-btn" id="btn-fullscreen" type="button" title="Полный экран">⛶</button>
       </div>
     </div>
 
@@ -131,11 +144,60 @@
     </div>
 
     <!-- ЧАТ -->
-    <div class="chat-panel">
+    <div class="chat-panel" id="chat-panel">
+      <div class="chat-mobile-header">
+        <span>💬 Чат СНТ</span>
+        <button id="chat-close-btn" type="button">✕</button>
+      </div>
       <div id="chat-messages"></div>
       <div class="chat-input-row">
         <input id="chat-input" type="text" maxlength="160" placeholder="Написать в чат СНТ (Enter)..." />
-        <button id="chat-send">➤</button>
+        <button id="chat-send" type="button">➤</button>
+      </div>
+    </div>
+
+    <!-- СЕНСОРНОЕ УПРАВЛЕНИЕ ДЛЯ ТЕЛЕФОНОВ И ПЛАНШЕТОВ -->
+    <div id="mobile-controls" aria-label="Сенсорное управление">
+      <!-- Левый виртуальный джойстик движения + кнопка бега -->
+      <div class="mob-left-cluster">
+        <button class="mob-aux-btn" id="btn-mob-sprint" type="button">⚡ Бег</button>
+        <div id="mob-joystick-zone">
+          <div id="mob-joystick-base">
+            <div id="mob-joystick-knob"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Контекстная панель вращения и дистанции при переноске доски пустой рукой -->
+      <div id="mob-grab-panel" class="mob-grab-panel" style="display:none;">
+        <button class="mob-grab-btn" id="btn-grab-rot-y" type="button">↻ Пов. Y</button>
+        <button class="mob-grab-btn" id="btn-grab-rot-x" type="button">↕ Наклон</button>
+        <button class="mob-grab-btn" id="btn-grab-rot-z" type="button">↺ Крен</button>
+        <button class="mob-grab-btn" id="btn-grab-near" type="button">➖ Ближе</button>
+        <button class="mob-grab-btn" id="btn-grab-far" type="button">➕ Дальше</button>
+      </div>
+
+      <!-- Правый блок кнопок действий -->
+      <div class="mob-right-cluster">
+        <div class="mob-sec-row">
+          <button class="mob-sec-btn" id="btn-mob-rotate" type="button" title="Повернуть доску [R]">🔄 Пов.</button>
+          <button class="mob-sec-btn" id="btn-mob-demolish" type="button" title="Вернуть доску в инвентарь [X]">🪵⬅ Убрать</button>
+          <button class="mob-sec-btn" id="btn-mob-stash" type="button" title="Убрать предмет в рюкзак [G]">🎒 В рюкзак</button>
+        </div>
+        <div class="mob-main-row">
+          <button class="mob-action-btn mob-use-btn" id="btn-mob-use" type="button">
+            <span class="mob-btn-icon">👋</span>
+            <span class="mob-btn-text">Действ.</span>
+          </button>
+          <button class="mob-action-btn mob-jump-btn" id="btn-mob-jump" type="button">
+            <span class="mob-btn-icon">⬆️</span>
+            <span class="mob-btn-text">Прыжок</span>
+          </button>
+          <button class="mob-action-btn mob-primary-btn" id="btn-mob-primary" type="button">
+            <span class="mob-btn-icon" id="mob-primary-icon">🪓</span>
+            <span class="mob-btn-text" id="mob-primary-text">Рубить</span>
+          </button>
+        </div>
       </div>
     </div>
 
@@ -154,7 +216,7 @@
     <div class="modal-window">
       <div class="modal-header">
         <h2 id="modal-title">Меню</h2>
-        <button class="modal-close" id="modal-close">✕</button>
+        <button class="modal-close" id="modal-close" type="button">✕</button>
       </div>
       <div id="modal-subtitle" style="font-size:13px;color:#c5e1a5;"></div>
       <div class="modal-body" id="modal-body"></div>
@@ -163,6 +225,6 @@
 
   <div id="toast-container"></div>
 
-  <script type="module" src="js/game.js?v=20"></script>
+  <script type="module" src="js/game.js?v=21"></script>
 </body>
 </html>

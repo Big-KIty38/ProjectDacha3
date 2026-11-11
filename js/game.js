@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { Peer } from "peerjs";
 import mqtt from "mqtt";
 import { generateSecretKey, finalizeEvent } from "nostr-tools/pure";
-import { CHUNK_SIZE, getTerrainHeight, getChunkLayout } from "./world.js?v=20";
+import { CHUNK_SIZE, getTerrainHeight, getChunkLayout } from "./world.js?v=21";
 import {
   ITEMS,
   CROPS,
@@ -11,7 +11,7 @@ import {
   SHOP_GOODS,
   BAZAAR_PRICES,
   playSfx
-} from "./data.js?v=20";
+} from "./data.js?v=21";
 import {
   createTerrainChunkMesh,
   createResourceMesh,
@@ -28,7 +28,7 @@ import {
   rebuildPlankNailsMesh,
   createSingleNailMesh,
   animatePlayerMesh
-} from "./models.js?v=20";
+} from "./models.js?v=21";
 
 const savedProfile = JSON.parse(localStorage.getItem("project_dacha3_profile_v1") || "null");
 
@@ -223,14 +223,44 @@ scene.add(plankPreviewMesh);
 const loadedChunks = new Map();
 
 
+let manualTouchModeOverride = null;
+
+function detectMobileOrTouchDevice() {
+  if (manualTouchModeOverride !== null) return manualTouchModeOverride;
+  const hasCoarse = typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches;
+  const hasTouch = ("ontouchstart" in window) || (navigator.maxTouchPoints > 0);
+  const smallScreen = window.innerWidth <= 960 || window.innerHeight <= 540;
+  return Boolean(hasCoarse || hasTouch || smallScreen);
+}
+
+function isTouchModeActive() {
+  return document.body.classList.contains("touch-mode");
+}
+
+function syncTouchModeClass() {
+  const shouldEnable = detectMobileOrTouchDevice();
+  document.body.classList.toggle("touch-mode", shouldEnable);
+  const toggleBtn = document.getElementById("btn-touch-toggle");
+  if (toggleBtn) {
+    toggleBtn.textContent = shouldEnable ? "📱" : "💻";
+    toggleBtn.style.borderColor = shouldEnable ? "#ffd54f" : "#66bb6a";
+  }
+}
+syncTouchModeClass();
+
 function lockPointerSafe() {
+  if (isTouchModeActive()) return;
   if (
     state.started &&
     modalBackdrop.style.display !== "flex" &&
     document.activeElement !== document.getElementById("chat-input") &&
-    document.pointerLockElement !== canvas
+    document.pointerLockElement !== canvas &&
+    typeof canvas.requestPointerLock === "function"
   ) {
-    try { canvas.requestPointerLock(); } catch {}
+    try {
+      const p = canvas.requestPointerLock();
+      if (p && typeof p.catch === "function") p.catch(() => {});
+    } catch {}
   }
 }
 
@@ -1308,18 +1338,41 @@ function executeInteraction(target) {
 
 const FOOD_KEYS = ["pie", "berry", "potato", "cucumber", "tomato", "strawberry", "jam", "pickles"];
 
-export function getHeldItemTitle(id = state.heldItem) {
-  if (id === "hand") return "✋ Пустая рука (Удерж. ЛКМ — тащить • ЛКМ + R/Q/E/ПКМ — вращать доску)";
-  if (id === "plank") return `🪵 Доска (${state.inv.plank || 0} шт. • ЛКМ — поставить • [R] — повернуть)`;
-  if (id === "nails") return `🔩 Гвозди (${state.inv.nails || 0} шт. • ЛКМ по доске — воткнуть гвоздь)`;
-  if (id === "hammer") return "🔨 Молоток (ЛКМ по гвоздю — забивать в доску и сбивать доски)";
-  if (id === "saw") return "🪚 Пила-ножовка (ЛКМ по доске — отпилить часть доски по красной метке)";
+export function getHeldItemTitle(id = state.heldItem, short = false) {
+  const compact = short || isTouchModeActive();
+  if (id === "hand") {
+    return compact
+      ? "✋ Пустая рука"
+      : "✋ Пустая рука (Удерж. ЛКМ — тащить • ЛКМ + R/Q/E/ПКМ — вращать доску)";
+  }
+  if (id === "plank") {
+    return compact
+      ? `🪵 Доска (${state.inv.plank || 0} шт.)`
+      : `🪵 Доска (${state.inv.plank || 0} шт. • ЛКМ — поставить • [R] — повернуть)`;
+  }
+  if (id === "nails") {
+    return compact
+      ? `🔩 Гвозди (${state.inv.nails || 0} шт.)`
+      : `🔩 Гвозди (${state.inv.nails || 0} шт. • ЛКМ по доске — воткнуть гвоздь)`;
+  }
+  if (id === "hammer") {
+    return compact
+      ? "🔨 Молоток"
+      : "🔨 Молоток (ЛКМ по гвоздю — забивать в доску и сбивать доски)";
+  }
+  if (id === "saw") {
+    return compact
+      ? "🪚 Пила-ножовка"
+      : "🪚 Пила-ножовка (ЛКМ по доске — отпилить часть доски по красной метке)";
+  }
   if (id === "axe") return state.tools.axe ? "🪓 Стальной топор (x2 дерево)" : "🪓 Топор дачника";
   if (id === "watering_can") return "🚿 Садовая лейка";
   if (ITEMS[id]) {
     const info = ITEMS[id];
     const cnt = state.inv[id] || 0;
-    return `${info.icon} ${info.name} (${cnt} шт.${info.food > 0 ? ` • +${info.food}% сытости [F]` : ""})`;
+    return compact
+      ? `${info.icon} ${info.name} (${cnt} шт.)`
+      : `${info.icon} ${info.name} (${cnt} шт.${info.food > 0 ? ` • +${info.food}% сытости [F]` : ""})`;
   }
   return "✋ Пустая рука";
 }
@@ -1402,6 +1455,11 @@ function getHotbarSlots() {
 }
 
 function selectHeldItem(id, silent = false) {
+  if (id !== "hand" && grabState.active) {
+    mobileGrabLocked = false;
+    leftMouseDown = false;
+    endHandGrab();
+  }
   unstashFromBackpack(id);
   if (id === "berry" && (state.inv.berry || 0) <= 0) {
     showToast("🍓 У вас пока нет ягод! Соберите их с ягодного куста [E] или купите пирожок в Магазине.");
@@ -3380,8 +3438,37 @@ let lastMouseX = 0;
 let lastMouseY = 0;
 let pointerLockedBeforeClick = false;
 let grabStartedThisClick = false;
+let lastTouchEventTime = 0;
+let mobileGrabLocked = false;
+
+// Универсальное основное действие (рубка, установка доски, гвоздя, удар молотком, распил пилой, еда, интеракция)
+function triggerPrimaryAction() {
+  if (!state.started || modalBackdrop.style.display === "flex") return;
+  if (state.heldItem === "plank") {
+    placePhysicalPlankAction();
+  } else if (state.heldItem === "nails") {
+    placeNailAtCrosshairAction();
+  } else if (state.heldItem === "hammer") {
+    hammerNailAtCrosshairAction();
+  } else if (state.heldItem === "saw") {
+    sawPlankAtCrosshairAction();
+  } else {
+    const nearest = findNearestInteractable();
+    if (nearest) executeInteraction(nearest);
+    else if (ITEMS[state.heldItem]?.food > 0) eatFoodAction();
+    else state.workTimer = 0.32;
+  }
+}
+
+function toggleCameraPerspective() {
+  state.firstPerson = !state.firstPerson;
+  selfMesh.visible = !state.firstPerson;
+  fpHand.visible = state.firstPerson;
+  showToast(state.firstPerson ? "👁️ Вид от первого лица" : "🎥 Вид от третьего лица");
+}
 
 canvas.addEventListener("mousedown", (e) => {
+  if (Date.now() - lastTouchEventTime < 650) return;
   if (modalBackdrop.style.display === "flex") {
     pointerLockedBeforeClick = false;
     return;
@@ -3390,12 +3477,12 @@ canvas.addEventListener("mousedown", (e) => {
   if (e.button === 2) rightMouseDown = true;
 
   pointerLockedBeforeClick = document.pointerLockElement === canvas;
-  if (state.started && document.pointerLockElement !== canvas) {
-    try { canvas.requestPointerLock(); } catch {}
+  if (!isTouchModeActive() && state.started && document.pointerLockElement !== canvas) {
+    lockPointerSafe();
   }
 
   grabStartedThisClick = false;
-  if (e.button === 0 && state.started && pointerLockedBeforeClick && state.heldItem === "hand") {
+  if (e.button === 0 && state.started && (pointerLockedBeforeClick || isTouchModeActive()) && state.heldItem === "hand") {
     if (tryStartHandGrab()) {
       grabStartedThisClick = true;
     }
@@ -3408,9 +3495,8 @@ canvas.addEventListener("mousedown", (e) => {
 });
 
 window.addEventListener("mousemove", (e) => {
+  if (Date.now() - lastTouchEventTime < 650) return;
   if (modalBackdrop.style.display === "flex") return;
-
-
 
   if (document.pointerLockElement === canvas && state.started) {
     state.camYaw -= e.movementX * 0.0026;
@@ -3430,10 +3516,11 @@ window.addEventListener("mousemove", (e) => {
 });
 
 window.addEventListener("mouseup", (e) => {
-  if (e.button === 0) leftMouseDown = false;
+  if (Date.now() - lastTouchEventTime < 650) return;
+  if (e.button === 0 && !mobileGrabLocked) leftMouseDown = false;
   if (e.button === 2) rightMouseDown = false;
 
-  if (e.button === 0 && grabState.active) {
+  if (e.button === 0 && grabState.active && !mobileGrabLocked) {
     endHandGrab();
   }
 
@@ -3442,21 +3529,8 @@ window.addEventListener("mouseup", (e) => {
   isDraggingCam = false;
   if (modalBackdrop.style.display === "flex") return;
 
-  if (wasLocked && !dragMoved && !grabStartedThisClick && state.started && e.button === 0 && e.target === canvas) {
-    if (state.heldItem === "plank") {
-      placePhysicalPlankAction();
-    } else if (state.heldItem === "nails") {
-      placeNailAtCrosshairAction();
-    } else if (state.heldItem === "hammer") {
-      hammerNailAtCrosshairAction();
-    } else if (state.heldItem === "saw") {
-      sawPlankAtCrosshairAction();
-    } else {
-      const nearest = findNearestInteractable();
-      if (nearest) executeInteraction(nearest);
-      else if (ITEMS[state.heldItem]?.food > 0) eatFoodAction();
-      else state.workTimer = 0.32;
-    }
+  if ((wasLocked || isTouchModeActive()) && !dragMoved && !grabStartedThisClick && state.started && e.button === 0 && e.target === canvas) {
+    triggerPrimaryAction();
   }
   grabStartedThisClick = false;
 });
@@ -3477,13 +3551,497 @@ window.addEventListener("resize", () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  syncTouchModeClass();
 });
+
+// ==========================================
+// СЕНСОРНОЕ УПРАВЛЕНИЕ (ВИРТУАЛЬНЫЙ ДЖОЙСТИК, МУЛЬТИТАЧ-КАМЕРА И КНОПКИ)
+// ==========================================
+const joyState = {
+  active: false,
+  touchId: null,
+  x: 0,
+  y: 0,
+  sprintToggle: false
+};
+
+const joyZone = document.getElementById("mob-joystick-zone");
+const joyBase = document.getElementById("mob-joystick-base");
+const joyKnob = document.getElementById("mob-joystick-knob");
+const btnMobSprint = document.getElementById("btn-mob-sprint");
+
+function updateJoystickFromPoint(clientX, clientY) {
+  if (!joyBase || !joyKnob) return;
+  const rect = joyBase.getBoundingClientRect();
+  const cx = rect.left + rect.width / 2;
+  const cy = rect.top + rect.height / 2;
+  const maxR = Math.max(28, rect.width * 0.42);
+  let dx = clientX - cx;
+  let dy = clientY - cy;
+  const dist = Math.hypot(dx, dy);
+  if (dist > maxR) {
+    dx = (dx / dist) * maxR;
+    dy = (dy / dist) * maxR;
+  }
+  joyKnob.style.transform = `translate(${dx.toFixed(1)}px, ${dy.toFixed(1)}px)`;
+  joyState.x = +(dx / maxR).toFixed(3);
+  joyState.y = +(-dy / maxR).toFixed(3);
+}
+
+function resetJoystick() {
+  joyState.active = false;
+  joyState.touchId = null;
+  joyState.x = 0;
+  joyState.y = 0;
+  if (joyKnob) joyKnob.style.transform = "translate(0px, 0px)";
+}
+
+if (joyZone) {
+  joyZone.addEventListener("touchstart", (e) => {
+    lastTouchEventTime = Date.now();
+    e.preventDefault();
+    e.stopPropagation();
+    const t = e.changedTouches[0];
+    if (!t) return;
+    joyState.active = true;
+    joyState.touchId = t.identifier;
+    updateJoystickFromPoint(t.clientX, t.clientY);
+  }, { passive: false });
+
+  joyZone.addEventListener("touchmove", (e) => {
+    lastTouchEventTime = Date.now();
+    e.preventDefault();
+    e.stopPropagation();
+    if (!joyState.active) return;
+    for (let i = 0; i < e.changedTouches.length; i++) {
+      const t = e.changedTouches[i];
+      if (t.identifier === joyState.touchId) {
+        updateJoystickFromPoint(t.clientX, t.clientY);
+        break;
+      }
+    }
+  }, { passive: false });
+
+  const endJoyTouch = (e) => {
+    lastTouchEventTime = Date.now();
+    for (let i = 0; i < e.changedTouches.length; i++) {
+      if (e.changedTouches[i].identifier === joyState.touchId) {
+        resetJoystick();
+        break;
+      }
+    }
+  };
+  joyZone.addEventListener("touchend", endJoyTouch, { passive: false });
+  joyZone.addEventListener("touchcancel", endJoyTouch, { passive: false });
+
+  // Поддержка мыши для тестирования джойстика на ПК
+  let mouseJoyActive = false;
+  joyZone.addEventListener("mousedown", (e) => {
+    if (Date.now() - lastTouchEventTime < 650) return;
+    e.preventDefault();
+    e.stopPropagation();
+    mouseJoyActive = true;
+    joyState.active = true;
+    updateJoystickFromPoint(e.clientX, e.clientY);
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (!mouseJoyActive) return;
+    updateJoystickFromPoint(e.clientX, e.clientY);
+  });
+  window.addEventListener("mouseup", () => {
+    if (!mouseJoyActive) return;
+    mouseJoyActive = false;
+    resetJoystick();
+  });
+}
+
+if (btnMobSprint) {
+  btnMobSprint.addEventListener("click", (e) => {
+    e.stopPropagation();
+    joyState.sprintToggle = !joyState.sprintToggle;
+    btnMobSprint.classList.toggle("active", joyState.sprintToggle);
+    showToast(joyState.sprintToggle ? "⚡ Постоянный бег включён" : "🚶 Обычный шаг");
+  });
+}
+
+// Мультитач-вращение камеры и зум щипком (Pinch) по 3D-холсту
+const lookTouch = {
+  id: null,
+  startX: 0,
+  startY: 0,
+  lastX: 0,
+  lastY: 0,
+  startTime: 0,
+  moved: false
+};
+let lastPinchDist = null;
+
+canvas.addEventListener("touchstart", (e) => {
+  lastTouchEventTime = Date.now();
+  if (!state.started || modalBackdrop.style.display === "flex") return;
+  e.preventDefault();
+
+  if (e.touches.length >= 2) {
+    const dx = e.touches[0].clientX - e.touches[1].clientX;
+    const dy = e.touches[0].clientY - e.touches[1].clientY;
+    lastPinchDist = Math.hypot(dx, dy);
+  }
+
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    const t = e.changedTouches[i];
+    if (t.identifier === joyState.touchId) continue;
+    if (lookTouch.id === null) {
+      lookTouch.id = t.identifier;
+      lookTouch.startX = t.clientX;
+      lookTouch.startY = t.clientY;
+      lookTouch.lastX = t.clientX;
+      lookTouch.lastY = t.clientY;
+      lookTouch.startTime = Date.now();
+      lookTouch.moved = false;
+      break;
+    }
+  }
+}, { passive: false });
+
+canvas.addEventListener("touchmove", (e) => {
+  lastTouchEventTime = Date.now();
+  if (!state.started || modalBackdrop.style.display === "flex") return;
+  e.preventDefault();
+
+  // Обработка щипка двумя пальцами на холсте (дистанция доски или камеры от 3-го лица)
+  if (e.touches.length >= 2 && joyState.touchId === null) {
+    const dx = e.touches[0].clientX - e.touches[1].clientX;
+    const dy = e.touches[0].clientY - e.touches[1].clientY;
+    const dist = Math.hypot(dx, dy);
+    if (lastPinchDist !== null) {
+      const delta = dist - lastPinchDist;
+      if (grabState.active) {
+        grabState.distance = Math.max(1.5, Math.min(7.0, grabState.distance + delta * 0.012));
+      } else if (!state.firstPerson) {
+        state.camDist = Math.max(4.5, Math.min(24, state.camDist - delta * 0.03));
+      }
+      lookTouch.moved = true;
+    }
+    lastPinchDist = dist;
+    return;
+  }
+
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    const t = e.changedTouches[i];
+    if (t.identifier === lookTouch.id) {
+      const dx = t.clientX - lookTouch.lastX;
+      const dy = t.clientY - lookTouch.lastY;
+      if (Math.hypot(t.clientX - lookTouch.startX, t.clientY - lookTouch.startY) > 10) {
+        lookTouch.moved = true;
+      }
+      lookTouch.lastX = t.clientX;
+      lookTouch.lastY = t.clientY;
+      state.camYaw -= dx * 0.0056;
+      state.camPitch = Math.max(-1.25, Math.min(1.25, state.camPitch + dy * 0.0048));
+      state.ry = state.camYaw;
+      break;
+    }
+  }
+}, { passive: false });
+
+function handleCanvasTouchEnd(e) {
+  lastTouchEventTime = Date.now();
+  if (e.touches.length < 2) lastPinchDist = null;
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    const t = e.changedTouches[i];
+    if (t.identifier === lookTouch.id) {
+      const elapsed = Date.now() - lookTouch.startTime;
+      const wasTap = !lookTouch.moved && elapsed < 240;
+      lookTouch.id = null;
+      if (wasTap && state.started && modalBackdrop.style.display !== "flex" && !grabState.active) {
+        triggerPrimaryAction();
+      }
+      break;
+    }
+  }
+}
+canvas.addEventListener("touchend", handleCanvasTouchEnd, { passive: false });
+canvas.addEventListener("touchcancel", handleCanvasTouchEnd, { passive: false });
+
+// Кнопки мобильного управления
+function bindHoldButton(btnId, onDown, onUp) {
+  const el = document.getElementById(btnId);
+  if (!el) return;
+  const start = (e) => {
+    lastTouchEventTime = Date.now();
+    e.preventDefault();
+    e.stopPropagation();
+    onDown();
+  };
+  const end = (e) => {
+    lastTouchEventTime = Date.now();
+    e.preventDefault();
+    e.stopPropagation();
+    if (onUp) onUp();
+  };
+  el.addEventListener("touchstart", start, { passive: false });
+  el.addEventListener("touchend", end, { passive: false });
+  el.addEventListener("touchcancel", end, { passive: false });
+  el.addEventListener("mousedown", (e) => {
+    if (Date.now() - lastTouchEventTime < 650) return;
+    start(e);
+  });
+  el.addEventListener("mouseup", (e) => {
+    if (Date.now() - lastTouchEventTime < 650) return;
+    end(e);
+  });
+  el.addEventListener("mouseleave", () => { if (onUp) onUp(); });
+}
+
+// Основная кнопка действия (Рубить / Ставить доску / Забивать гвоздь / Пилить / Схватить-Отпустить доску рукой)
+let primaryPressStartTime = 0;
+bindHoldButton(
+  "btn-mob-primary",
+  () => {
+    if (!state.started) return;
+    primaryPressStartTime = Date.now();
+    if (state.heldItem === "hand") {
+      if (grabState.active) {
+        mobileGrabLocked = false;
+        leftMouseDown = false;
+        endHandGrab();
+        updateMobileControlsUI();
+        return;
+      }
+      leftMouseDown = true;
+      if (tryStartHandGrab()) {
+        mobileGrabLocked = true;
+        updateMobileControlsUI();
+        return;
+      }
+      leftMouseDown = false;
+    }
+    triggerPrimaryAction();
+    updateMobileControlsUI();
+  },
+  () => {
+    if (state.heldItem === "hand" && grabState.active && mobileGrabLocked) {
+      // Если кнопку удерживали дольше 420 мс — отпускаем доску при отпускании пальца;
+      // если нажали коротко — доска остаётся в захвате, чтобы удобно целиться и вращать!
+      if (Date.now() - primaryPressStartTime > 420) {
+        mobileGrabLocked = false;
+        leftMouseDown = false;
+        endHandGrab();
+        updateMobileControlsUI();
+      }
+    }
+  }
+);
+
+// Кнопка [E] Действие (Магазин, Базар, Табличка участка, Грядки, Ягоды)
+bindHoldButton("btn-mob-use", () => {
+  if (!state.started) return;
+  const nearest = findNearestInteractable();
+  if (nearest) {
+    executeInteraction(nearest);
+  } else {
+    triggerPrimaryAction();
+  }
+});
+
+// Кнопка Прыжка (Space)
+bindHoldButton(
+  "btn-mob-jump",
+  () => {
+    keys["Space"] = true;
+    if (state.started && state.isGrounded) {
+      state.vy = 7.4;
+      state.isGrounded = false;
+    }
+  },
+  () => {
+    keys["Space"] = false;
+  }
+);
+
+// Кнопка Поворота [R]
+bindHoldButton(
+  "btn-mob-rotate",
+  () => {
+    if (grabState.active) {
+      keys["KeyR"] = true;
+    } else {
+      state.plankSpawnYaw = (state.plankSpawnYaw + Math.PI / 4) % (Math.PI * 2);
+      showToast("🔄 Доска повёрнута на 45°");
+    }
+  },
+  () => {
+    keys["KeyR"] = false;
+  }
+);
+
+// Кнопка Убрать доску [X]
+bindHoldButton("btn-mob-demolish", () => {
+  if (!state.started) return;
+  demolishNearestStructure();
+});
+
+// Кнопка В рюкзак [G]
+bindHoldButton("btn-mob-stash", () => {
+  if (!state.started) return;
+  stashHeldItemToBackpack();
+});
+
+// Кнопки панели 3D-вращения и дистанции схваченной доски
+bindHoldButton("btn-grab-rot-y", () => { keys["KeyR"] = true; }, () => { keys["KeyR"] = false; });
+bindHoldButton("btn-grab-rot-x", () => { keys["KeyE"] = true; }, () => { keys["KeyE"] = false; });
+bindHoldButton("btn-grab-rot-z", () => { keys["KeyQ"] = true; }, () => { keys["KeyQ"] = false; });
+bindHoldButton("btn-grab-near", () => {
+  if (grabState.active) grabState.distance = Math.max(1.5, grabState.distance - 0.4);
+});
+bindHoldButton("btn-grab-far", () => {
+  if (grabState.active) grabState.distance = Math.min(7.0, grabState.distance + 0.4);
+});
+
+function updateMobileControlsUI() {
+  const grabPanel = document.getElementById("mob-grab-panel");
+  if (grabPanel) {
+    grabPanel.style.display = grabState.active ? "flex" : "none";
+  }
+
+  const primBtn = document.getElementById("btn-mob-primary");
+  const primIcon = document.getElementById("mob-primary-icon");
+  const primText = document.getElementById("mob-primary-text");
+  const useBtn = document.getElementById("btn-mob-use");
+  const nearest = state.started ? findNearestInteractable() : null;
+
+  if (useBtn) {
+    useBtn.classList.toggle("highlight", Boolean(nearest));
+  }
+
+  if (primBtn && primIcon && primText) {
+    primBtn.classList.toggle("grabbing", grabState.active);
+    const held = state.heldItem;
+    if (grabState.active) {
+      primIcon.textContent = "✋";
+      primText.textContent = "Отпустить";
+    } else if (held === "plank") {
+      primIcon.textContent = "🪵";
+      primText.textContent = "Ставить";
+    } else if (held === "nails") {
+      primIcon.textContent = "🔩";
+      primText.textContent = "Гвоздь";
+    } else if (held === "hammer") {
+      primIcon.textContent = "🔨";
+      primText.textContent = "Забить";
+    } else if (held === "saw") {
+      primIcon.textContent = "🪚";
+      primText.textContent = "Пилить";
+    } else if (held === "axe") {
+      primIcon.textContent = "🪓";
+      primText.textContent = "Рубить";
+    } else if (ITEMS[held]?.food > 0) {
+      primIcon.textContent = "😋";
+      primText.textContent = "Съесть";
+    } else if (held === "hand") {
+      const plankHit = state.started ? raycastPlankSurface(6.2) : null;
+      if (plankHit) {
+        primIcon.textContent = "✋";
+        primText.textContent = "Схватить";
+      } else if (nearest) {
+        primIcon.textContent = "👋";
+        primText.textContent = "Собрать";
+      } else {
+        primIcon.textContent = "✋";
+        primText.textContent = "Рука";
+      }
+    } else {
+      primIcon.textContent = "⚡";
+      primText.textContent = "Действ.";
+    }
+  }
+}
 
 document.getElementById("btn-inv").addEventListener("click", openInventoryModal);
 document.getElementById("btn-eat").addEventListener("click", () => { eatFoodAction(); lockPointerSafe(); });
 document.getElementById("btn-craft").addEventListener("click", openCraftModal);
 document.getElementById("btn-build").addEventListener("click", openBuildModal);
 document.getElementById("interact-prompt").addEventListener("click", () => executeInteraction(findNearestInteractable()));
+
+const btnCamView = document.getElementById("btn-cam-view");
+if (btnCamView) {
+  btnCamView.addEventListener("click", (e) => {
+    e.stopPropagation();
+    toggleCameraPerspective();
+    lockPointerSafe();
+  });
+}
+
+const btnTouchToggle = document.getElementById("btn-touch-toggle");
+if (btnTouchToggle) {
+  btnTouchToggle.addEventListener("click", (e) => {
+    e.stopPropagation();
+    manualTouchModeOverride = !isTouchModeActive();
+    syncTouchModeClass();
+    updateHudUI();
+    showToast(isTouchModeActive() ? "📱 Включено мобильное управление" : "💻 Включено управление для ПК");
+  });
+}
+
+const btnFullscreen = document.getElementById("btn-fullscreen");
+if (btnFullscreen) {
+  btnFullscreen.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen?.().catch(() => {});
+    } else {
+      document.exitFullscreen?.().catch(() => {});
+    }
+  });
+}
+
+const minimapWrapEl = document.getElementById("minimap-wrap");
+if (minimapWrapEl) {
+  minimapWrapEl.addEventListener("click", (e) => {
+    e.stopPropagation();
+    minimapWrapEl.classList.toggle("expanded");
+  });
+}
+
+const chatPanelEl = document.getElementById("chat-panel");
+const onlineBoxEl = document.getElementById("online-box");
+const btnToggleChat = document.getElementById("btn-toggle-chat");
+const btnToggleOnline = document.getElementById("btn-toggle-online");
+const chatCloseBtn = document.getElementById("chat-close-btn");
+const chatUnreadDot = document.getElementById("chat-unread-dot");
+
+if (btnToggleChat && chatPanelEl) {
+  btnToggleChat.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const isOpen = chatPanelEl.classList.toggle("mob-open");
+    btnToggleChat.classList.toggle("active", isOpen);
+    if (isOpen) {
+      if (chatUnreadDot) chatUnreadDot.style.display = "none";
+      if (onlineBoxEl) onlineBoxEl.classList.remove("mob-open");
+      if (btnToggleOnline) btnToggleOnline.classList.remove("active");
+    }
+  });
+}
+
+if (chatCloseBtn && chatPanelEl) {
+  chatCloseBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    chatPanelEl.classList.remove("mob-open");
+    if (btnToggleChat) btnToggleChat.classList.remove("active");
+  });
+}
+
+if (btnToggleOnline && onlineBoxEl) {
+  btnToggleOnline.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const isOpen = onlineBoxEl.classList.toggle("mob-open");
+    btnToggleOnline.classList.toggle("active", isOpen);
+    if (isOpen && chatPanelEl) {
+      chatPanelEl.classList.remove("mob-open");
+      if (btnToggleChat) btnToggleChat.classList.remove("active");
+    }
+  });
+}
 
 function appendChatLine(msg) {
   const box = document.getElementById("chat-messages");
@@ -3497,6 +4055,9 @@ function appendChatLine(msg) {
   div.append(senderSpan, textSpan);
   box.appendChild(div);
   box.scrollTop = box.scrollHeight;
+  if (chatPanelEl && !chatPanelEl.classList.contains("mob-open") && msg.sender && msg.sender !== "СНТ-Инфо") {
+    if (chatUnreadDot) chatUnreadDot.style.display = "inline-block";
+  }
 }
 
 function sendChatFromInput() {
@@ -3546,8 +4107,8 @@ function updateHudUI() {
   if (eatBtnEl) {
     const heldFood = ITEMS[state.heldItem]?.food > 0 ? ITEMS[state.heldItem] : null;
     eatBtnEl.innerHTML = heldFood
-      ? `<kbd>F</kbd> 😋 Съесть: ${heldFood.icon} ${heldFood.name}`
-      : `<kbd>F</kbd> 🍓 Поесть (из руки)`;
+      ? `<kbd>F</kbd> 😋 <span class="btn-lbl-full">Съесть: ${heldFood.icon} ${heldFood.name}</span><span class="btn-lbl-short">${heldFood.icon} Съесть</span>`
+      : `<kbd>F</kbd> 🍓 <span class="btn-lbl-full">Поесть (из руки)</span><span class="btn-lbl-short">Еда</span>`;
   }
 
   const invBar = document.getElementById("inventory-bar");
@@ -3592,6 +4153,9 @@ function updateOnlineListUI() {
     }
   }
   document.getElementById("online-count").textContent = String(all.length);
+  const mobOnlineEl = document.getElementById("mob-online-count");
+  if (mobOnlineEl) mobOnlineEl.textContent = String(all.length);
+  updateMobileControlsUI();
   all.forEach((p) => {
     const row = document.createElement("div");
     row.className = "online-item";
@@ -3806,14 +4370,25 @@ function animate(now) {
     if (keys["KeyD"] || keys["ArrowRight"]) right += 1;
     if (keys["KeyA"] || keys["ArrowLeft"]) right -= 1;
 
-    const sprinting = (keys["ShiftLeft"] || keys["ShiftRight"]) && state.energy > 5;
-    const baseSpeed = state.hunger > 10 ? (sprinting ? 13.5 : 8.6) : 5.5;
+    const joyMag = Math.hypot(joyState.x, joyState.y);
+    if (joyState.active && joyMag > 0.08) {
+      fwd += joyState.y;
+      right += joyState.x;
+    }
+
+    const sprinting =
+      (keys["ShiftLeft"] || keys["ShiftRight"] || joyState.sprintToggle || (joyState.active && joyMag > 0.86)) &&
+      state.energy > 5;
+    const speedFactor = joyState.active && joyMag < 0.75 ? Math.max(0.45, joyMag / 0.75) : 1.0;
+    const baseSpeed = (state.hunger > 10 ? (sprinting ? 13.5 : 8.6) : 5.5) * speedFactor;
 
     if (fwd !== 0 || right !== 0) {
       isMoving = true;
       const len = Math.hypot(fwd, right);
-      fwd /= len;
-      right /= len;
+      if (len > 1e-4) {
+        fwd /= len;
+        right /= len;
+      }
       const sinY = Math.sin(state.camYaw);
       const cosY = Math.cos(state.camYaw);
       const vx = (-sinY * fwd + cosY * right) * baseSpeed;
