@@ -2,7 +2,13 @@ import * as THREE from "three";
 import { Peer } from "peerjs";
 import mqtt from "mqtt";
 import { generateSecretKey, finalizeEvent } from "nostr-tools/pure";
-import { CHUNK_SIZE, getTerrainHeight, getChunkLayout } from "./world.js?v=21";
+import {
+  CHUNK_SIZE,
+  getTerrainHeight,
+  getChunkLayout,
+  hasEastWestHighway,
+  hasNorthSouthHighway
+} from "./world.js?v=23";
 import {
   ITEMS,
   CROPS,
@@ -11,10 +17,10 @@ import {
   SHOP_GOODS,
   BAZAAR_PRICES,
   playSfx
-} from "./data.js?v=21";
+} from "./data.js?v=23";
 import {
   createTerrainChunkMesh,
-  createResourceMesh,
+  createChunkResourcesBatch,
   createSntEntranceMeshes,
   createPlotBoundaryMesh,
   updatePlotSignTexture,
@@ -28,9 +34,24 @@ import {
   rebuildPlankNailsMesh,
   createSingleNailMesh,
   animatePlayerMesh
-} from "./models.js?v=21";
+} from "./models.js?v=23";
 
-const savedProfile = JSON.parse(localStorage.getItem("project_dacha3_profile_v1") || "null");
+// Полная очистка всей истории прошлой игры (старых участков, досок, построек и профилей)
+const GAME_RESET_EPOCH = "dacha3_taiga_clean_epoch_v1";
+const PROFILE_STORAGE_KEY = "project_dacha3_profile_taiga_v1";
+try {
+  if (localStorage.getItem("project_dacha3_reset_epoch") !== GAME_RESET_EPOCH) {
+    const legacyKeys = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith("project_dacha")) legacyKeys.push(k);
+    }
+    for (const k of legacyKeys) localStorage.removeItem(k);
+    localStorage.setItem("project_dacha3_reset_epoch", GAME_RESET_EPOCH);
+  }
+} catch {}
+
+const savedProfile = JSON.parse(localStorage.getItem(PROFILE_STORAGE_KEY) || "null");
 
 const state = {
   started: false,
@@ -68,7 +89,7 @@ const state = {
   },
   x: 0,
   y: 0,
-  z: 42,
+  z: 82,
   vy: 0,
   ry: Math.PI,
   camYaw: 0,
@@ -87,7 +108,7 @@ const state = {
   remotePlayers: new Map()
 };
 
-const WORLD_PLANKS_STORAGE_KEY = "project_dacha3_world_planks_v1";
+const WORLD_PLANKS_STORAGE_KEY = "project_dacha3_planks_taiga_v1";
 
 function loadSavedWorldPlanks() {
   try {
@@ -122,7 +143,7 @@ state.tools.saw = true;
 function saveLocalProfile() {
   try {
     localStorage.setItem(
-      "project_dacha3_profile_v1",
+      PROFILE_STORAGE_KEY,
       JSON.stringify({
         playerKey: state.playerKey,
         name: state.name,
@@ -268,10 +289,11 @@ function resolveCollisions(nx, nz) {
   const playerRadius = 0.42;
   for (const ch of loadedChunks.values()) {
     if (Math.abs(nx - ch.centerX) > CHUNK_SIZE * 0.75 || Math.abs(nz - ch.centerZ) > CHUNK_SIZE * 0.75) continue;
-    for (const [, rm] of ch.resMeshes.entries()) {
-      const res = rm.userData.resource;
+    for (const entry of ch.activeResources.values()) {
+      const res = entry.res;
+      if (Math.abs(nx - res.x) > 3.2 || Math.abs(nz - res.z) > 3.2) continue;
       let colR = 0;
-      if (res.kind === "birch" || res.kind === "pine") colR = 0.55 * (res.scale || 1);
+      if (res.kind === "birch" || res.kind === "pine" || res.kind === "spruce") colR = 0.55 * (res.scale || 1);
       else if (res.kind === "rock") colR = 1.15 * (res.scale || 1);
       else continue;
       const minDist = playerRadius + colR;
@@ -285,14 +307,17 @@ function resolveCollisions(nx, nz) {
         nz += (dz / dist) * overlap;
       }
     }
-    for (const pav of [ch.layout.shopPos, ch.layout.bazaarPos]) {
-      const dx = nx - pav.x;
-      const dz = nz - pav.z;
-      if (Math.abs(dx) < 3.5 && Math.abs(dz) < 2.6) {
-        const penX = 3.5 - Math.abs(dx);
-        const penZ = 2.6 - Math.abs(dz);
-        if (penX < penZ) nx += dx >= 0 ? penX : -penX;
-        else nz += dz >= 0 ? penZ : -penZ;
+    if (ch.layout.hasSnt) {
+      for (const pav of [ch.layout.shopPos, ch.layout.bazaarPos]) {
+        if (!pav) continue;
+        const dx = nx - pav.x;
+        const dz = nz - pav.z;
+        if (Math.abs(dx) < 3.5 && Math.abs(dz) < 2.6) {
+          const penX = 3.5 - Math.abs(dx);
+          const penZ = 2.6 - Math.abs(dz);
+          if (penX < penZ) nx += dx >= 0 ? penX : -penX;
+          else nz += dz >= 0 ? penZ : -penZ;
+        }
       }
     }
     if (ch.layout.dumpsterPos) {
@@ -364,7 +389,9 @@ function loadChunk(cx, cz) {
   const group = new THREE.Group();
 
   group.add(createTerrainChunkMesh(cx, cz));
-  group.add(createSntEntranceMeshes(layout));
+  if (layout.hasSnt) {
+    group.add(createSntEntranceMeshes(layout));
+  }
 
   const plotMeshes = new Map();
   const price = getNextPlotPrice();
@@ -374,16 +401,21 @@ function loadChunk(cx, cz) {
     plotMeshes.set(p.plotId, pm);
   }
 
-  const resMeshes = new Map();
-  for (const res of layout.resources) {
-    if (state.harvested[res.id]) continue;
-    const rm = createResourceMesh(res);
-    group.add(rm);
-    resMeshes.set(res.id, rm);
-  }
+  const { container, activeResources, berryEntries } = createChunkResourcesBatch(layout, state.harvested);
+  group.add(container);
 
   scene.add(group);
-  loadedChunks.set(key, { cx, cz, centerX: layout.centerX, centerZ: layout.centerZ, group, layout, plotMeshes, resMeshes });
+  loadedChunks.set(key, {
+    cx,
+    cz,
+    centerX: layout.centerX,
+    centerZ: layout.centerZ,
+    group,
+    layout,
+    plotMeshes,
+    activeResources,
+    berryEntries
+  });
 }
 
 function refreshAllPlotSigns() {
@@ -398,13 +430,13 @@ function refreshAllPlotSigns() {
 // ==========================================
 // МУЛЬТИПЛЕЕРНАЯ СИНХРОНИЗАЦИЯ (ЕДИНЫЙ ЦЕНТРАЛЬНЫЙ СЕРВЕР СНТ #1)
 // ==========================================
-const CENTRAL_ROOM_TOPIC = "project_dacha3_snt_unified_server_v4";
+const CENTRAL_ROOM_TOPIC = "project_dacha3_taiga_clean_server_v1";
 const NTFY_HTTP_URL = `https://ntfy.sh/${CENTRAL_ROOM_TOPIC}`;
 const NTFY_WS_URL = `wss://ntfy.sh/${CENTRAL_ROOM_TOPIC}/ws?since=2h`;
 const NTFY_SSE_URL = `https://ntfy.sh/${CENTRAL_ROOM_TOPIC}/sse?since=2h`;
 
 const seenPackets = new Set();
-const bcChannel = typeof BroadcastChannel !== "undefined" ? new BroadcastChannel("project_dacha_3_sync_v4") : null;
+const bcChannel = typeof BroadcastChannel !== "undefined" ? new BroadcastChannel("project_dacha3_taiga_bc_v1") : null;
 
 let ntfyConnected = false;
 const mqttClients = [];
@@ -729,10 +761,10 @@ function mergeWorldSnapshot(pkt) {
       if (!state.harvested[nid]) {
         state.harvested[nid] = hdata;
         for (const ch of loadedChunks.values()) {
-          const rm = ch.resMeshes.get(nid);
-          if (rm) {
-            ch.group.remove(rm);
-            ch.resMeshes.delete(nid);
+          const entry = ch.activeResources.get(nid);
+          if (entry) {
+            entry.hide();
+            ch.activeResources.delete(nid);
           }
         }
       }
@@ -844,10 +876,10 @@ function handleIncomingPacket(pkt) {
       if (!nodeId) return;
       state.harvested[nodeId] = { nodeId, permanent: Boolean(pkt.permanent), time: Date.now() };
       for (const ch of loadedChunks.values()) {
-        const rm = ch.resMeshes.get(nodeId);
-        if (rm) {
-          ch.group.remove(rm);
-          ch.resMeshes.delete(nodeId);
+        const entry = ch.activeResources.get(nodeId);
+        if (entry) {
+          entry.hide();
+          ch.activeResources.delete(nodeId);
         }
       }
       saveLocalProfile();
@@ -1034,7 +1066,7 @@ function initMultiplayerNetwork() {
       nostrSockets.push(nws);
       nws.onopen = () => {
         updateNetBadge();
-        nws.send(JSON.stringify(["REQ", "snt-v5", { "#t": [CENTRAL_ROOM_TOPIC], limit: 200 }]));
+        nws.send(JSON.stringify(["REQ", "snt-taiga-v1", { "#t": [CENTRAL_ROOM_TOPIC], limit: 200 }]));
         if (state.started) sendMyPresenceAndWorldSnapshot();
       };
       nws.onmessage = (ev) => {
@@ -1087,26 +1119,28 @@ function findNearestInteractable() {
   let bestDist = 5.8;
 
   for (const ch of loadedChunks.values()) {
-    const dShop = Math.hypot(px - ch.layout.shopPos.x, pz - ch.layout.shopPos.z);
-    if (dShop < 4.8 && dShop < bestDist) {
-      bestDist = dShop;
-      best = {
-        kind: "shop",
-        title: `🏪 Магазин «Сельпо» (${ch.layout.sntName})`,
-        sub: "Нажмите [E] или ЛКМ — Купить семена, еду, стройматериалы",
-        data: ch.layout
-      };
-    }
+    if (ch.layout.hasSnt && ch.layout.shopPos && ch.layout.bazaarPos) {
+      const dShop = Math.hypot(px - ch.layout.shopPos.x, pz - ch.layout.shopPos.z);
+      if (dShop < 4.8 && dShop < bestDist) {
+        bestDist = dShop;
+        best = {
+          kind: "shop",
+          title: `🏪 Магазин «Сельпо» (${ch.layout.sntName})`,
+          sub: "Нажмите [E] или ЛКМ — Купить семена, еду, стройматериалы",
+          data: ch.layout
+        };
+      }
 
-    const dBaz = Math.hypot(px - ch.layout.bazaarPos.x, pz - ch.layout.bazaarPos.z);
-    if (dBaz < 4.8 && dBaz < bestDist) {
-      bestDist = dBaz;
-      best = {
-        kind: "bazaar",
-        title: `⚖️ Дачный Базар (${ch.layout.sntName})`,
-        sub: "Нажмите [E] или ЛКМ — Продать урожай, ягоды, брёвна и заготовки",
-        data: ch.layout
-      };
+      const dBaz = Math.hypot(px - ch.layout.bazaarPos.x, pz - ch.layout.bazaarPos.z);
+      if (dBaz < 4.8 && dBaz < bestDist) {
+        bestDist = dBaz;
+        best = {
+          kind: "bazaar",
+          title: `⚖️ Дачный Базар (${ch.layout.sntName})`,
+          sub: "Нажмите [E] или ЛКМ — Продать урожай, ягоды, брёвна и заготовки",
+          data: ch.layout
+        };
+      }
     }
 
     for (const p of ch.layout.plots) {
@@ -1140,8 +1174,9 @@ function findNearestInteractable() {
       }
     }
 
-    for (const [, rm] of ch.resMeshes.entries()) {
-      const res = rm.userData.resource;
+    for (const entry of ch.activeResources.values()) {
+      const res = entry.res;
+      if (Math.abs(px - res.x) > 3.5 || Math.abs(pz - res.z) > 3.5) continue;
       const dist = Math.hypot(px - res.x, pz - res.z);
       if (dist < 3.4 && dist < bestDist) {
         bestDist = dist;
@@ -1150,34 +1185,40 @@ function findNearestInteractable() {
           const hasBerries = Date.now() - pickedTime > 45_000;
           best = {
             kind: "resource",
-            title: hasBerries ? "🍓 Куст с лесными ягодами" : "🌿 Ягодный куст (ягоды собраны)",
+            title: hasBerries ? "🍓 Таёжный ягодный куст" : "🌿 Ягодный куст (ягоды собраны)",
             sub: hasBerries
               ? "Нажмите [E] или ЛКМ — Собрать спелые ягоды (+3 🍓, +1 🌿)"
               : "Нажмите [E] — Расчистить куст на ветки (+2 🌿)",
-            data: { res, mesh: rm, hasBerries }
+            data: { res, entry, hasBerries }
           };
         } else if (res.kind === "bush") {
           best = {
             kind: "resource",
-            title: "🌿 Дикий кустарник",
+            title: "🌿 Таёжный кустарник",
             sub: "Нажмите [E] или ЛКМ — Срубить куст (+2 Ветки 🌿)",
-            data: { res, mesh: rm }
+            data: { res, entry }
           };
-        } else if (res.kind === "birch" || res.kind === "pine") {
+        } else if (res.kind === "birch" || res.kind === "pine" || res.kind === "spruce") {
+          const treeTitle =
+            res.kind === "birch"
+              ? "🌳 Берёза"
+              : res.kind === "spruce"
+                ? "🌲 Таёжная ель"
+                : "🌲 Таёжная сосна";
           best = {
             kind: "resource",
-            title: res.kind === "birch" ? "🌳 Русская берёза" : "🌲 Лесная сосна",
+            title: treeTitle,
             sub: state.heldItem === "axe"
               ? `Нажмите [E] или ЛКМ — Срубить топором (+${state.tools.axe ? 4 : 2} Бревна 🪵, +2 Ветки 🌿)`
               : "🪓 Возьмите Топор в руку [клавиша 2], чтобы срубить дерево!",
-            data: { res, mesh: rm }
+            data: { res, entry }
           };
         } else if (res.kind === "rock") {
           best = {
             kind: "resource",
-            title: "🪨 Каменный валун",
+            title: "🪨 Таёжный валун",
             sub: "Нажмите [E] или ЛКМ — Добыть камень (+3 Камня 🪨)",
-            data: { res, mesh: rm }
+            data: { res, entry }
           };
         }
       }
@@ -1256,10 +1297,10 @@ function executeInteraction(target) {
   }
 
   if (target.kind === "resource") {
-    const { res, mesh, hasBerries } = target.data;
+    const { res, entry, hasBerries } = target.data;
     if (res.kind === "berry_bush" && hasBerries) {
       state.berryPickedAt[res.id] = Date.now();
-      if (mesh.userData.berriesGroup) mesh.userData.berriesGroup.visible = false;
+      if (entry && entry.berriesGroup) entry.berriesGroup.visible = false;
       state.inv.berry = (state.inv.berry || 0) + 3;
       state.inv.branch = (state.inv.branch || 0) + 1;
       playSfx("pick");
@@ -1277,13 +1318,14 @@ function executeInteraction(target) {
       }
     }
 
-    if ((res.kind === "birch" || res.kind === "pine") && state.heldItem !== "axe") {
+    const isTree = res.kind === "birch" || res.kind === "pine" || res.kind === "spruce";
+    if (isTree && state.heldItem !== "axe") {
       showToast("🪓 Чтобы срубить дерево, возьмите Топор в руку [клавиша 2]!");
       return;
     }
 
     playSfx("chop");
-    if (res.kind === "birch" || res.kind === "pine") {
+    if (isTree) {
       const woodGain = state.tools.axe ? 4 : 2;
       state.inv.wood = (state.inv.wood || 0) + woodGain;
       state.inv.branch = (state.inv.branch || 0) + 2;
@@ -1301,9 +1343,10 @@ function executeInteraction(target) {
     state.harvested[res.id] = { nodeId: res.id, permanent, time: Date.now() };
 
     for (const ch of loadedChunks.values()) {
-      if (ch.resMeshes.has(res.id)) {
-        ch.group.remove(mesh);
-        ch.resMeshes.delete(res.id);
+      const found = ch.activeResources.get(res.id);
+      if (found) {
+        found.hide();
+        ch.activeResources.delete(res.id);
       }
     }
 
@@ -4711,40 +4754,70 @@ const mmCtx = minimapCanvas.getContext("2d");
 function renderMinimap() {
   const w = minimapCanvas.width;
   const h = minimapCanvas.height;
-  const scale = 0.62;
-  mmCtx.fillStyle = "#1c331e";
+  const scale = 0.50;
+  mmCtx.fillStyle = "#142816";
   mmCtx.fillRect(0, 0, w, h);
 
   const toScreen = (wx, wz) => [w / 2 + (wx - state.x) * scale, h / 2 + (wz - state.z) * scale];
+  const halfChunk = CHUNK_SIZE * 0.5;
+
+  const pcx = Math.floor((state.x + halfChunk) / CHUNK_SIZE);
+  const pcz = Math.floor((state.z + halfChunk) / CHUNK_SIZE);
+  mmCtx.strokeStyle = "#545d66";
+  mmCtx.lineWidth = 4.5;
+  for (let dz = -1; dz <= 1; dz++) {
+    const cz = pcz + dz;
+    if (hasEastWestHighway(cz)) {
+      const czWorld = cz * CHUNK_SIZE + 136;
+      const [hx1, hz1] = toScreen(state.x - CHUNK_SIZE, czWorld);
+      const [hx2, hz2] = toScreen(state.x + CHUNK_SIZE, czWorld);
+      mmCtx.beginPath();
+      mmCtx.moveTo(hx1, hz1);
+      mmCtx.lineTo(hx2, hz2);
+      mmCtx.stroke();
+    }
+  }
+  for (let dx = -1; dx <= 1; dx++) {
+    const cx = pcx + dx;
+    if (hasNorthSouthHighway(cx)) {
+      const cxWorld = cx * CHUNK_SIZE - 142;
+      const [vx1, vz1] = toScreen(cxWorld, state.z - CHUNK_SIZE);
+      const [vx2, vz2] = toScreen(cxWorld, state.z + CHUNK_SIZE);
+      mmCtx.beginPath();
+      mmCtx.moveTo(vx1, vz1);
+      mmCtx.lineTo(vx2, vz2);
+      mmCtx.stroke();
+    }
+  }
 
   for (const ch of loadedChunks.values()) {
-    // Лесное асфальтовое шоссе снаружи СНТ
-    const [hx1, hz1] = toScreen(ch.centerX - 150, ch.centerZ + 108);
-    const [hx2, hz2] = toScreen(ch.centerX + 150, ch.centerZ + 108);
-    mmCtx.strokeStyle = "#545d66";
-    mmCtx.lineWidth = 5;
-    mmCtx.beginPath();
-    mmCtx.moveTo(hx1, hz1);
-    mmCtx.lineTo(hx2, hz2);
-    mmCtx.stroke();
 
-    // Центральная грунтовая улица СНТ и подъездная дорога
-    const [rx1, rz1] = toScreen(ch.centerX - 82, ch.centerZ);
-    const [rx2, rz2] = toScreen(ch.centerX + 82, ch.centerZ);
+    if (!ch.layout.hasSnt) continue;
+
+    // Окружной грунтовый проезд по периметру всех 4 кварталов СНТ
+    const [pLeft, pTop] = toScreen(ch.centerX - 77.5, ch.centerZ - 77.5);
+    mmCtx.strokeStyle = "#8d6e4c";
+    mmCtx.lineWidth = 3.5;
+    mmCtx.strokeRect(pLeft, pTop, 155 * scale, 155 * scale);
+
+    // Центральный крест грунтовых улиц СНТ + въездная дорога от трассы
     mmCtx.strokeStyle = "#9c7b56";
-    mmCtx.lineWidth = 5;
+    mmCtx.lineWidth = 4.5;
+    const [rx1, rz1] = toScreen(ch.centerX - 77.5, ch.centerZ);
+    const [rx2, rz2] = toScreen(ch.centerX + 77.5, ch.centerZ);
     mmCtx.beginPath();
     mmCtx.moveTo(rx1, rz1);
     mmCtx.lineTo(rx2, rz2);
     mmCtx.stroke();
 
-    const [ex1, ez1] = toScreen(ch.centerX, ch.centerZ);
-    const [ex2, ez2] = toScreen(ch.centerX, ch.centerZ + 108);
+    const [ex1, ez1] = toScreen(ch.centerX, ch.centerZ - 77.5);
+    const [ex2, ez2] = toScreen(ch.centerX, ch.centerZ + 136);
     mmCtx.beginPath();
     mmCtx.moveTo(ex1, ez1);
     mmCtx.lineTo(ex2, ez2);
     mmCtx.stroke();
 
+    // 4 квартала по 4 участка (2x2 в каждом квартале = 16 участков)
     for (const p of ch.layout.plots) {
       const [sx, sz] = toScreen(p.x - p.w / 2, p.z - p.d / 2);
       const own = state.plots[p.plotId];
@@ -4758,18 +4831,21 @@ function renderMinimap() {
         mmCtx.fillStyle = "rgba(41, 182, 246, 0.38)";
         mmCtx.strokeStyle = "#29b6f6";
       }
-      mmCtx.lineWidth = 1.5;
+      mmCtx.lineWidth = 1.3;
       mmCtx.fillRect(sx, sz, p.w * scale, p.d * scale);
       mmCtx.strokeRect(sx, sz, p.w * scale, p.d * scale);
     }
 
-    const [shX, shZ] = toScreen(ch.layout.shopPos.x, ch.layout.shopPos.z);
-    mmCtx.fillStyle = "#ffd54f";
-    mmCtx.fillRect(shX - 4, shZ - 4, 8, 8);
-
-    const [bzX, bzZ] = toScreen(ch.layout.bazaarPos.x, ch.layout.bazaarPos.z);
-    mmCtx.fillStyle = "#ff7043";
-    mmCtx.fillRect(bzX - 4, bzZ - 4, 8, 8);
+    if (ch.layout.shopPos) {
+      const [shX, shZ] = toScreen(ch.layout.shopPos.x, ch.layout.shopPos.z);
+      mmCtx.fillStyle = "#ffd54f";
+      mmCtx.fillRect(shX - 3.5, shZ - 3.5, 7, 7);
+    }
+    if (ch.layout.bazaarPos) {
+      const [bzX, bzZ] = toScreen(ch.layout.bazaarPos.x, ch.layout.bazaarPos.z);
+      mmCtx.fillStyle = "#ff7043";
+      mmCtx.fillRect(bzX - 3.5, bzZ - 3.5, 7, 7);
+    }
     if (ch.layout.dumpsterPos) {
       const [dmX, dmZ] = toScreen(ch.layout.dumpsterPos.x, ch.layout.dumpsterPos.z);
       mmCtx.fillStyle = "#66bb6a";
@@ -4816,7 +4892,8 @@ document.querySelectorAll(".color-swatch").forEach((sw) => {
 function resetPlayerProgressAndObjects() {
   const nick = (nickInput?.value || state.name || "").trim();
   removeObjectsByOwner(nick || state.name, state.playerKey, true);
-  localStorage.removeItem("project_dacha3_profile_v1");
+  localStorage.removeItem(PROFILE_STORAGE_KEY);
+  localStorage.removeItem(WORLD_PLANKS_STORAGE_KEY);
   setTimeout(() => window.location.reload(), 120);
 }
 
@@ -5000,11 +5077,9 @@ function animate(now) {
   }
 
   for (const ch of loadedChunks.values()) {
-    for (const [resId, rm] of ch.resMeshes.entries()) {
-      if (rm.userData.berriesGroup && !rm.userData.berriesGroup.visible) {
-        if (Date.now() - (state.berryPickedAt[resId] || 0) > 45_000) {
-          rm.userData.berriesGroup.visible = true;
-        }
+    for (const b of ch.berryEntries) {
+      if (!b.berriesGroup.visible && Date.now() - (state.berryPickedAt[b.id] || 0) > 45_000) {
+        b.berriesGroup.visible = true;
       }
     }
   }
@@ -5083,7 +5158,9 @@ function animate(now) {
           ? `📍 ${curPlot.sntName} • Уч. №${curPlot.plotNum} (${own.ownerName})`
           : `📍 ${curPlot.sntName} • Уч. №${curPlot.plotNum} (Свободен)`;
       } else if (curChunk) {
-        locEl.textContent = `📍 ${curChunk.layout.sntName} (Лес и дороги)`;
+        locEl.textContent = curChunk.layout.hasSnt
+          ? `📍 ${curChunk.layout.sntName} (Окрестности и дороги)`
+          : "🌲 Глухая Тайга (Лес и трассы)";
       }
 
       const promptEl = document.getElementById("interact-prompt");

@@ -56,7 +56,7 @@ interface ChatMessage {
 }
 
 export default class DachaServer implements Party.Server {
-  readonly WORLD_SEED = 20260777;
+  readonly WORLD_SEED = 20261111;
   players: Map<string, PlayerState> = new Map();
   plots: Record<string, PlotOwnership> = {};
   structures: Record<string, StructureData> = {};
@@ -70,6 +70,11 @@ export default class DachaServer implements Party.Server {
     if (this.initialized) return;
     this.initialized = true;
     try {
+      const resetEpoch = await this.room.storage.get<string>("resetEpoch");
+      if (resetEpoch !== "dacha3_taiga_clean_epoch_v1") {
+        await this.room.storage.deleteAll();
+        await this.room.storage.put("resetEpoch", "dacha3_taiga_clean_epoch_v1");
+      }
       const savedPlots = await this.room.storage.get<Record<string, PlotOwnership>>("plots");
       if (savedPlots) this.plots = savedPlots;
 
@@ -116,7 +121,7 @@ export default class DachaServer implements Party.Server {
       color: "#2e7d32",
       x: 0,
       y: 0,
-      z: 18,
+      z: 82,
       ry: 0,
       anim: "idle",
       money: 500,

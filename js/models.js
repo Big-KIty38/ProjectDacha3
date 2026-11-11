@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { CHUNK_SIZE, getTerrainHeight, getSurfaceType } from "./world.js?v=21";
+import { CHUNK_SIZE, getTerrainHeight, getSurfaceType } from "./world.js?v=23";
 
 // ==========================================
 // ПРОЦЕДУРНЫЕ БЕСШОВНЫЕ ТЕКСТУРЫ (Трава, Береста, Кора сосны, Доски, Брус, Кирпич, Листва)
@@ -158,16 +158,16 @@ const TEX_BRICK = makeProceduralTexture(256, (ctx, s) => {
 // Общие геометрии (увеличенные до реалистичных размеров 1:1 к человеку 1.75м!)
 const GEO = {
   birchTrunk: new THREE.CylinderGeometry(0.22, 0.36, 7.2, 8),
-  birchCrown1: new THREE.DodecahedronGeometry(2.4, 1),
-  birchCrown2: new THREE.DodecahedronGeometry(1.85, 1),
+  birchCrown1: new THREE.DodecahedronGeometry(2.4, 0),
+  birchCrown2: new THREE.DodecahedronGeometry(1.85, 0),
   pineTrunk: new THREE.CylinderGeometry(0.28, 0.44, 6.4, 8),
   pineCones: [
     new THREE.ConeGeometry(2.7, 3.8, 8),
     new THREE.ConeGeometry(2.15, 3.3, 8),
     new THREE.ConeGeometry(1.55, 2.8, 8)
   ],
-  bush1: new THREE.DodecahedronGeometry(1.15, 1),
-  bush2: new THREE.DodecahedronGeometry(0.85, 1),
+  bush1: new THREE.DodecahedronGeometry(1.15, 0),
+  bush2: new THREE.DodecahedronGeometry(0.85, 0),
   berry: new THREE.SphereGeometry(0.11, 5, 5),
   rock: new THREE.DodecahedronGeometry(1.35, 0),
   plotPost: new THREE.BoxGeometry(0.26, 1.35, 0.26),
@@ -255,7 +255,7 @@ export function makeFloatingBadge(lines, scaleX = 3.2, scaleY = 1.0, opts = {}) 
 }
 
 export function createTerrainChunkMesh(cx, cz) {
-  const segs = 90;
+  const segs = 96;
   const geo = new THREE.PlaneGeometry(CHUNK_SIZE, CHUNK_SIZE, segs, segs);
   geo.rotateX(-Math.PI / 2);
 
@@ -264,8 +264,8 @@ export function createTerrainChunkMesh(cx, cz) {
   const centerX = cx * CHUNK_SIZE;
   const centerZ = cz * CHUNK_SIZE;
 
-  const cForestLow = new THREE.Color(0x336330);
-  const cForestHigh = new THREE.Color(0x4b8340);
+  const cForestLow = new THREE.Color(0x234720);
+  const cForestHigh = new THREE.Color(0x3a6b33);
   const cLawn = new THREE.Color(0x68b84d);
   const cDirt = new THREE.Color(0x9c7b56);
   const cAsphalt = new THREE.Color(0x454b52);
@@ -359,6 +359,10 @@ export function createResourceMesh(res) {
       g.add(berriesGroup);
       g.userData.berriesGroup = berriesGroup;
     }
+  } else if (res.kind === "spruce") {
+    const trunk = new THREE.Mesh(INST_GEO.spruceTrunk, MAT.spruceTrunk);
+    const crown = new THREE.Mesh(INST_GEO.spruceCrown, MAT.spruceLeaf);
+    g.add(trunk, crown);
   } else if (res.kind === "rock") {
     const r1 = new THREE.Mesh(GEO.rock, MAT.rock);
     r1.position.set(0, 0.6, 0);
@@ -368,6 +372,157 @@ export function createResourceMesh(res) {
 
   g.userData.resource = res;
   return g;
+}
+
+function mergeNonIndexedGeometries(parts) {
+  const nonIdx = parts.map(({ geo, x = 0, y = 0, z = 0, sx = 1, sy = 1, sz = 1 }) => {
+    const g = geo.index ? geo.toNonIndexed() : geo.clone();
+    if (sx !== 1 || sy !== 1 || sz !== 1) g.scale(sx, sy, sz);
+    if (x !== 0 || y !== 0 || z !== 0) g.translate(x, y, z);
+    return g;
+  });
+  let totalVerts = 0;
+  for (const g of nonIdx) totalVerts += g.attributes.position.count;
+  const positions = new Float32Array(totalVerts * 3);
+  const normals = new Float32Array(totalVerts * 3);
+  const uvs = new Float32Array(totalVerts * 2);
+  let vOff = 0;
+  for (const g of nonIdx) {
+    const cnt = g.attributes.position.count;
+    positions.set(g.attributes.position.array, vOff * 3);
+    if (g.attributes.normal) normals.set(g.attributes.normal.array, vOff * 3);
+    if (g.attributes.uv) uvs.set(g.attributes.uv.array, vOff * 2);
+    vOff += cnt;
+  }
+  const out = new THREE.BufferGeometry();
+  out.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  out.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
+  out.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+  return out;
+}
+
+MAT.spruceTrunk = new THREE.MeshStandardMaterial({ map: TEX_PINE_BARK, color: 0x4a3228, roughness: 0.92 });
+MAT.spruceLeaf = new THREE.MeshStandardMaterial({ map: TEX_FOLIAGE, color: 0x1d4f26, roughness: 0.88 });
+
+const INST_GEO = {
+  birchTrunk: mergeNonIndexedGeometries([{ geo: GEO.birchTrunk, y: 3.5 }]),
+  birchCrown: mergeNonIndexedGeometries([
+    { geo: GEO.birchCrown1, x: 0, y: 6.6, z: 0 },
+    { geo: GEO.birchCrown2, x: 0.85, y: 8.0, z: 0.45 }
+  ]),
+  pineTrunk: mergeNonIndexedGeometries([{ geo: GEO.pineTrunk, y: 3.1 }]),
+  pineCrown: mergeNonIndexedGeometries([
+    { geo: GEO.pineCones[0], y: 4.8 },
+    { geo: GEO.pineCones[1], y: 6.9 },
+    { geo: GEO.pineCones[2], y: 9.0 }
+  ]),
+  spruceTrunk: mergeNonIndexedGeometries([{ geo: new THREE.CylinderGeometry(0.20, 0.40, 7.6, 7), y: 3.8 }]),
+  spruceCrown: mergeNonIndexedGeometries([
+    { geo: new THREE.ConeGeometry(3.05, 3.8, 6), y: 3.0 },
+    { geo: new THREE.ConeGeometry(2.50, 3.5, 6), y: 5.0 },
+    { geo: new THREE.ConeGeometry(1.90, 3.2, 6), y: 6.9 },
+    { geo: new THREE.ConeGeometry(1.25, 2.8, 6), y: 8.7 }
+  ]),
+  bush: mergeNonIndexedGeometries([
+    { geo: GEO.bush1, x: 0, y: 0.75, z: 0 },
+    { geo: GEO.bush2, x: 0.55, y: 0.62, z: 0.35 }
+  ]),
+  rock: mergeNonIndexedGeometries([{ geo: GEO.rock, x: 0, y: 0.6, z: 0, sx: 1.25, sy: 0.82, sz: 1.05 }])
+};
+
+const ZERO_INSTANCE_MAT = new THREE.Matrix4().makeScale(0, 0, 0);
+
+export function createChunkResourcesBatch(layout, harvestedMap) {
+  const container = new THREE.Group();
+  const activeResources = new Map();
+  const berryEntries = [];
+
+  const buckets = {
+    spruce: [],
+    pine: [],
+    birch: [],
+    bush: [],
+    rock: []
+  };
+
+  for (const res of layout.resources) {
+    if (harvestedMap && harvestedMap[res.id]) continue;
+    if (res.kind === "berry_bush") {
+      const rm = createResourceMesh(res);
+      rm.updateMatrix();
+      rm.matrixAutoUpdate = false;
+      container.add(rm);
+      const berriesGroup = rm.userData.berriesGroup || null;
+      if (berriesGroup) berryEntries.push({ id: res.id, berriesGroup });
+      activeResources.set(res.id, {
+        res,
+        berriesGroup,
+        hide() {
+          container.remove(rm);
+        }
+      });
+    } else if (buckets[res.kind]) {
+      buckets[res.kind].push(res);
+    }
+  }
+
+  const dummyPos = new THREE.Vector3();
+  const dummyQuat = new THREE.Quaternion();
+  const dummyScale = new THREE.Vector3();
+  const dummyEuler = new THREE.Euler(0, 0, 0);
+  const dummyMat = new THREE.Matrix4();
+
+  const buildPairBatch = (items, trunkGeo, trunkMat, crownGeo, crownMat) => {
+    if (items.length === 0) return;
+    const trunkInst = new THREE.InstancedMesh(trunkGeo, trunkMat, items.length);
+    const crownInst = crownGeo ? new THREE.InstancedMesh(crownGeo, crownMat, items.length) : null;
+
+    for (let i = 0; i < items.length; i++) {
+      const res = items[i];
+      const y = getTerrainHeight(res.x, res.z);
+      const s = res.scale || 1;
+      dummyPos.set(res.x, y, res.z);
+      dummyEuler.set(0, res.rot || 0, 0);
+      dummyQuat.setFromEuler(dummyEuler);
+      dummyScale.set(s, s, s);
+      dummyMat.compose(dummyPos, dummyQuat, dummyScale);
+
+      trunkInst.setMatrixAt(i, dummyMat);
+      if (crownInst) crownInst.setMatrixAt(i, dummyMat);
+
+      const idx = i;
+      activeResources.set(res.id, {
+        res,
+        berriesGroup: null,
+        hide() {
+          trunkInst.setMatrixAt(idx, ZERO_INSTANCE_MAT);
+          trunkInst.instanceMatrix.needsUpdate = true;
+          if (crownInst) {
+            crownInst.setMatrixAt(idx, ZERO_INSTANCE_MAT);
+            crownInst.instanceMatrix.needsUpdate = true;
+          }
+        }
+      });
+    }
+
+    trunkInst.instanceMatrix.needsUpdate = true;
+    trunkInst.computeBoundingSphere();
+    container.add(trunkInst);
+
+    if (crownInst) {
+      crownInst.instanceMatrix.needsUpdate = true;
+      crownInst.computeBoundingSphere();
+      container.add(crownInst);
+    }
+  };
+
+  buildPairBatch(buckets.spruce, INST_GEO.spruceTrunk, MAT.spruceTrunk, INST_GEO.spruceCrown, MAT.spruceLeaf);
+  buildPairBatch(buckets.pine, INST_GEO.pineTrunk, MAT.pineTrunk, INST_GEO.pineCrown, MAT.pineLeaf);
+  buildPairBatch(buckets.birch, INST_GEO.birchTrunk, MAT.birchBark, INST_GEO.birchCrown, MAT.birchLeaf);
+  buildPairBatch(buckets.bush, INST_GEO.bush, MAT.bushLeaf, null, null);
+  buildPairBatch(buckets.rock, INST_GEO.rock, MAT.rock, null, null);
+
+  return { container, activeResources, berryEntries };
 }
 
 export function createSntEntranceMeshes(layout) {
