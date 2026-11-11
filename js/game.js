@@ -1343,7 +1343,7 @@ export function getHeldItemTitle(id = state.heldItem, short = false) {
   if (id === "hand") {
     return compact
       ? "✋ Пустая рука"
-      : "✋ Пустая рука (Удерж. ЛКМ — тащить • ЛКМ + R/Q/E/ПКМ — вращать доску)";
+      : "✋ Пустая рука (Удерж. ЛКМ — тащить • ЛКМ + Q/E/R + мышь — вращать по оси)";
   }
   if (id === "plank") {
     return compact
@@ -2605,7 +2605,7 @@ function checkDumpsterPlankDisposal() {
 }
 
 // ==========================================
-// ЗАХВАТ И ВРАЩЕНИЕ ДОСОК ПУСТОЙ РУКОЙ (УДЕРЖАНИЕ ЛКМ + ВРАЩЕНИЕ)
+// ЗАХВАТ И ВРАЩЕНИЕ ДОСОК ПУСТОЙ РУКОЙ (УДЕРЖАНИЕ ЛКМ + Q/E/R + ДВИЖЕНИЕ МЫШЬЮ)
 // ==========================================
 const grabState = {
   active: false,
@@ -2617,22 +2617,67 @@ const grabState = {
 };
 let leftMouseDown = false;
 let rightMouseDown = false;
+const mobGrabSpin = { y: false, x: false, z: false };
+const WORLD_UP = new THREE.Vector3(0, 1, 0);
 
-function isGrabRotationHeld() {
+function isGrabMouseRotateMode() {
   return (
-    rightMouseDown ||
-    Boolean(
-      keys["KeyR"] ||
-      keys["KeyQ"] ||
-      keys["KeyE"] ||
-      keys["KeyF"] ||
-      keys["KeyZ"] ||
-      keys["KeyX"] ||
-      keys["ShiftLeft"] ||
-      keys["ShiftRight"] ||
-      keys["AltLeft"]
-    )
+    grabState.active &&
+    (rightMouseDown || Boolean(keys["KeyR"] || keys["KeyE"] || keys["KeyQ"]))
   );
+}
+
+function applyGrabMouseRotation(dx, dy, sens) {
+  if (!grabState.active) return;
+  const holdR = Boolean(keys["KeyR"]);
+  const holdE = Boolean(keys["KeyE"]);
+  const holdQ = Boolean(keys["KeyQ"]);
+
+  const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+  camRight.y = 0;
+  if (camRight.lengthSq() > 1e-4) camRight.normalize();
+  else camRight.set(1, 0, 0);
+
+  const camFwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+  camFwd.y = 0;
+  if (camFwd.lengthSq() > 1e-4) camFwd.normalize();
+  else camFwd.set(0, 0, -1);
+
+  if (holdR || holdE || holdQ) {
+    if (holdR) {
+      const rawYaw = (holdE || holdQ) ? dx : (dx - dy * 0.35);
+      const angle = rawYaw * sens;
+      if (Math.abs(angle) > 1e-6) {
+        const qYaw = new THREE.Quaternion().setFromAxisAngle(WORLD_UP, angle);
+        grabState.deltaRot.premultiply(qYaw).normalize();
+      }
+    }
+    if (holdE) {
+      const rawPitch = (holdR || holdQ) ? -dy : (-dy + dx * 0.5);
+      const angle = rawPitch * sens;
+      if (Math.abs(angle) > 1e-6) {
+        const qPitch = new THREE.Quaternion().setFromAxisAngle(camRight, angle);
+        grabState.deltaRot.premultiply(qPitch).normalize();
+      }
+    }
+    if (holdQ) {
+      const rawRoll = (holdR || holdE) ? -dx : (-dx - dy * 0.35);
+      const angle = rawRoll * sens;
+      if (Math.abs(angle) > 1e-6) {
+        const qRoll = new THREE.Quaternion().setFromAxisAngle(camFwd, angle);
+        grabState.deltaRot.premultiply(qRoll).normalize();
+      }
+    }
+  } else if (rightMouseDown) {
+    if (Math.abs(dx) > 0) {
+      const qYaw = new THREE.Quaternion().setFromAxisAngle(WORLD_UP, dx * sens);
+      grabState.deltaRot.premultiply(qYaw).normalize();
+    }
+    if (Math.abs(dy) > 0) {
+      const qPitch = new THREE.Quaternion().setFromAxisAngle(camRight, -dy * sens);
+      grabState.deltaRot.premultiply(qPitch).normalize();
+    }
+  }
 }
 
 function tryStartHandGrab() {
@@ -2670,26 +2715,31 @@ function updateHandGrab(dt) {
     return;
   }
 
-  // Вращение предмета кнопками R, Q, E (при удержании ЛКМ) без участия мыши вообще:
-  const rotSpeed = 1.85 * dt;
-  const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
-  camRight.y = 0;
-  if (camRight.lengthSq() > 1e-4) camRight.normalize(); else camRight.set(1, 0, 0);
-  const camFwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-  camFwd.y = 0;
-  if (camFwd.lengthSq() > 1e-4) camFwd.normalize(); else camFwd.set(0, 0, -1);
+  // На ПК удержание Q / E / R НЕ крутит доску само — вращение происходит только движением мыши (applyGrabMouseRotation).
+  // Отдельные экранные кнопки на телефонах (mobGrabSpin) вращают плавно при удержании пальцем:
+  if (mobGrabSpin.y || mobGrabSpin.x || mobGrabSpin.z) {
+    const rotSpeed = 1.85 * dt;
+    const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+    camRight.y = 0;
+    if (camRight.lengthSq() > 1e-4) camRight.normalize();
+    else camRight.set(1, 0, 0);
+    const camFwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+    camFwd.y = 0;
+    if (camFwd.lengthSq() > 1e-4) camFwd.normalize();
+    else camFwd.set(0, 0, -1);
 
-  if (keys["KeyR"]) {
-    const qYaw = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), rotSpeed);
-    grabState.deltaRot.premultiply(qYaw).normalize();
-  }
-  if (keys["KeyE"]) {
-    const qPitch = new THREE.Quaternion().setFromAxisAngle(camRight, rotSpeed);
-    grabState.deltaRot.premultiply(qPitch).normalize();
-  }
-  if (keys["KeyQ"]) {
-    const qRoll = new THREE.Quaternion().setFromAxisAngle(camFwd, rotSpeed);
-    grabState.deltaRot.premultiply(qRoll).normalize();
+    if (mobGrabSpin.y) {
+      const qYaw = new THREE.Quaternion().setFromAxisAngle(WORLD_UP, rotSpeed);
+      grabState.deltaRot.premultiply(qYaw).normalize();
+    }
+    if (mobGrabSpin.x) {
+      const qPitch = new THREE.Quaternion().setFromAxisAngle(camRight, rotSpeed);
+      grabState.deltaRot.premultiply(qPitch).normalize();
+    }
+    if (mobGrabSpin.z) {
+      const qRoll = new THREE.Quaternion().setFromAxisAngle(camFwd, rotSpeed);
+      grabState.deltaRot.premultiply(qRoll).normalize();
+    }
   }
 
   const camPos = new THREE.Vector3();
@@ -2745,9 +2795,9 @@ function updateHandGrab(dt) {
     pl.qy = +newQuat.y.toFixed(5);
     pl.qz = +newQuat.z.toFixed(5);
     pl.qw = +newQuat.w.toFixed(5);
-    pl.vx = Math.max(-8, Math.min(8, +((pl.x - prevX) / Math.max(0.01, dt) * 0.35).toFixed(3)));
-    pl.vy = Math.max(-8, Math.min(8, +((pl.y - prevY) / Math.max(0.01, dt) * 0.35).toFixed(3)));
-    pl.vz = Math.max(-8, Math.min(8, +((pl.z - prevZ) / Math.max(0.01, dt) * 0.35).toFixed(3)));
+    pl.vx = Math.max(-8, Math.min(8, +(((pl.x - prevX) / Math.max(0.01, dt)) * 0.35).toFixed(3)));
+    pl.vy = Math.max(-8, Math.min(8, +(((pl.y - prevY) / Math.max(0.01, dt)) * 0.35).toFixed(3)));
+    pl.vz = Math.max(-8, Math.min(8, +(((pl.z - prevZ) / Math.max(0.01, dt)) * 0.35).toFixed(3)));
     pl.wx = 0;
     pl.wy = 0;
     pl.wz = 0;
@@ -2766,6 +2816,17 @@ function endHandGrab() {
   grabState.active = false;
   grabState.groupId = null;
   const updated = Object.values(state.planks).filter((p) => p.groupId === grpId);
+  // Гасим мелкую случайную инерцию при аккуратной укладке доски, сохраняя возможность сильного броска
+  for (const p of updated) {
+    if (Math.hypot(p.vx || 0, p.vz || 0) < 1.1) {
+      p.vx = 0;
+      p.vz = 0;
+      p.vy = Math.min(0, p.vy || 0);
+    }
+    p.wx = 0;
+    p.wy = 0;
+    p.wz = 0;
+  }
   saveWorldPlanks();
   if (updated.length > 0) {
     broadcastNetworkPacket({ type: "planks_batch", planks: updated }, true);
@@ -2773,7 +2834,7 @@ function endHandGrab() {
 }
 
 // ==========================================
-// РЕАЛИСТИЧНАЯ 3D-ФИЗИКА ДОСОК (OBB SAT-КОЛЛИЗИИ, ИМПУЛЬСЫ, КРУТЯЩИЙ МОМЕНТ И ОПРОКИДЫВАНИЕ)
+// РЕАЛИСТИЧНАЯ 3D-ФИЗИКА ДОСОК (ТОЧНЫЙ OBB-КЛИППИНГ, СУХОЕ ТРЕНИЕ И УСТОЙЧИВЫЕ СТОПКИ БЕЗ СЪЕЗЖАНИЯ)
 // ==========================================
 function getPlankGroundPoints(pl) {
   const q = new THREE.Quaternion(pl.qx || 0, pl.qy || 0, pl.qz || 0, pl.qw ?? 1).normalize();
@@ -2799,140 +2860,368 @@ function getPlankGroundPoints(pl) {
       }
     }
   }
-  // Центральные опорные точки по длине доски для плавного прилегания к рельефу
   for (const sy of [-1, 1]) {
     pts.push(center.clone().addScaledVector(u1, sy * e1));
   }
   return pts;
 }
 
-function buildPlankOBB(pl) {
+const OBB_EDGE_INDICES = [
+  [0, 1], [2, 3], [4, 5], [6, 7],
+  [0, 2], [1, 3], [4, 6], [5, 7],
+  [0, 4], [1, 5], [2, 6], [3, 7]
+];
+
+function buildPlankOBB(pl, extraHalf = 0) {
   const q = new THREE.Quaternion(pl.qx || 0, pl.qy || 0, pl.qz || 0, pl.qw ?? 1).normalize();
   const u0 = new THREE.Vector3(1, 0, 0).applyQuaternion(q);
   const u1 = new THREE.Vector3(0, 1, 0).applyQuaternion(q);
   const u2 = new THREE.Vector3(0, 0, 1).applyQuaternion(q);
-  const e0 = (pl.w || 2.4) / 2;
-  const e1 = (pl.h || 0.12) / 2;
-  const e2 = (pl.d || 0.36) / 2;
+  const e0 = (pl.w || 2.4) / 2 + extraHalf;
+  const e1 = (pl.h || 0.12) / 2 + extraHalf;
+  const e2 = (pl.d || 0.36) / 2 + extraHalf;
   const center = new THREE.Vector3(pl.x, pl.y, pl.z);
 
-  const corners = [];
+  const rx = Math.abs(u0.x) * e0 + Math.abs(u1.x) * e1 + Math.abs(u2.x) * e2;
+  const ry = Math.abs(u0.y) * e0 + Math.abs(u1.y) * e1 + Math.abs(u2.y) * e2;
+  const rz = Math.abs(u0.z) * e0 + Math.abs(u1.z) * e1 + Math.abs(u2.z) * e2;
+
+  const verts8 = [];
   for (const sx of [-1, 1]) {
     for (const sy of [-1, 1]) {
       for (const sz of [-1, 1]) {
-        corners.push(
-          center
-            .clone()
-            .addScaledVector(u0, sx * e0)
-            .addScaledVector(u1, sy * e1)
-            .addScaledVector(u2, sz * e2)
+        verts8.push(
+          new THREE.Vector3(
+            center.x + u0.x * sx * e0 + u1.x * sy * e1 + u2.x * sz * e2,
+            center.y + u0.y * sx * e0 + u1.y * sy * e1 + u2.y * sz * e2,
+            center.z + u0.z * sx * e0 + u1.z * sy * e1 + u2.z * sz * e2
+          )
         );
       }
     }
   }
-  // Дополнительные точки вдоль длинных рёбер для точного контакта при перекрещивании досок
-  for (const sy of [-1, 1]) {
-    for (const sz of [-1, 1]) {
-      corners.push(center.clone().addScaledVector(u1, sy * e1).addScaledVector(u2, sz * e2));
-      corners.push(center.clone().addScaledVector(u0, 0.5 * e0).addScaledVector(u1, sy * e1).addScaledVector(u2, sz * e2));
-      corners.push(center.clone().addScaledVector(u0, -0.5 * e0).addScaledVector(u1, sy * e1).addScaledVector(u2, sz * e2));
-    }
-  }
 
-  return { pl, q, center, axes: [u0, u1, u2], half: [e0, e1, e2], corners };
+  return {
+    pl,
+    q,
+    center,
+    axes: [u0, u1, u2],
+    half: [e0, e1, e2],
+    verts8,
+    minX: center.x - rx, maxX: center.x + rx,
+    minY: center.y - ry, maxY: center.y + ry,
+    minZ: center.z - rz, maxZ: center.z + rz
+  };
 }
 
-function projectOBBOnAxis(obb, axis) {
-  const cProj = obb.center.dot(axis);
+function projectOBBOnAxis(obb, axX, axY, axZ) {
+  const cProj = obb.center.x * axX + obb.center.y * axY + obb.center.z * axZ;
+  const a0 = obb.axes[0], a1 = obb.axes[1], a2 = obb.axes[2];
   const r =
-    obb.half[0] * Math.abs(obb.axes[0].dot(axis)) +
-    obb.half[1] * Math.abs(obb.axes[1].dot(axis)) +
-    obb.half[2] * Math.abs(obb.axes[2].dot(axis));
-  return { min: cProj - r, max: cProj + r, r };
-}
-
-function pointInsideOBBMargin(pt, obb, margin = 0.03) {
-  const d = pt.clone().sub(obb.center);
-  return (
-    Math.abs(d.dot(obb.axes[0])) <= obb.half[0] + margin &&
-    Math.abs(d.dot(obb.axes[1])) <= obb.half[1] + margin &&
-    Math.abs(d.dot(obb.axes[2])) <= obb.half[2] + margin
-  );
+    obb.half[0] * Math.abs(a0.x * axX + a0.y * axY + a0.z * axZ) +
+    obb.half[1] * Math.abs(a1.x * axX + a1.y * axY + a1.z * axZ) +
+    obb.half[2] * Math.abs(a2.x * axX + a2.y * axY + a2.z * axZ);
+  return { min: cProj - r, max: cProj + r };
 }
 
 function clampPointToOBB(pt, obb) {
-  const d = pt.clone().sub(obb.center);
+  const dx = pt.x - obb.center.x;
+  const dy = pt.y - obb.center.y;
+  const dz = pt.z - obb.center.z;
   const out = obb.center.clone();
   for (let i = 0; i < 3; i++) {
-    const c = Math.max(-obb.half[i], Math.min(obb.half[i], d.dot(obb.axes[i])));
-    out.addScaledVector(obb.axes[i], c);
+    const ax = obb.axes[i];
+    const c = Math.max(-obb.half[i], Math.min(obb.half[i], dx * ax.x + dy * ax.y + dz * ax.z));
+    out.addScaledVector(ax, c);
   }
   return out;
 }
 
-// Полный 15-осевой SAT-тест столкновения двух 3D-досок (OBB vs OBB)
-function testOBBCollision(obbA, obbB) {
-  const diff = obbA.center.clone().sub(obbB.center);
-  if (diff.lengthSq() > 26.0) return null;
+function clipSegmentToOBB(p0, p1, obb, margin, outPts) {
+  const d0x = p0.x - obb.center.x;
+  const d0y = p0.y - obb.center.y;
+  const d0z = p0.z - obb.center.z;
+  const dx = p1.x - p0.x;
+  const dy = p1.y - p0.y;
+  const dz = p1.z - p0.z;
+  let tMin = 0.0;
+  let tMax = 1.0;
 
-  let minOverlap = Infinity;
-  let bestAxis = null;
-
-  const candidateAxes = [
-    obbA.axes[0],
-    obbA.axes[1],
-    obbA.axes[2],
-    obbB.axes[0],
-    obbB.axes[1],
-    obbB.axes[2]
-  ];
-  for (let i = 0; i < 3; i++) {
-    for (let j = 0; j < 3; j++) {
-      const cross = new THREE.Vector3().crossVectors(obbA.axes[i], obbB.axes[j]);
-      if (cross.lengthSq() > 1e-5) {
-        candidateAxes.push(cross.normalize());
+  for (let k = 0; k < 3; k++) {
+    const ax = obb.axes[k];
+    const s0 = d0x * ax.x + d0y * ax.y + d0z * ax.z;
+    const ds = dx * ax.x + dy * ax.y + dz * ax.z;
+    const bound = obb.half[k] + margin;
+    if (Math.abs(ds) < 1e-8) {
+      if (Math.abs(s0) > bound) return;
+    } else {
+      let t1 = (-bound - s0) / ds;
+      let t2 = (bound - s0) / ds;
+      if (t1 > t2) {
+        const tmp = t1;
+        t1 = t2;
+        t2 = tmp;
       }
+      if (t1 > tMin) tMin = t1;
+      if (t2 < tMax) tMax = t2;
+      if (tMin > tMax) return;
     }
   }
 
-  for (const ax of candidateAxes) {
-    const pA = projectOBBOnAxis(obbA, ax);
-    const pB = projectOBBOnAxis(obbB, ax);
+  outPts.push(new THREE.Vector3(p0.x + dx * tMin, p0.y + dy * tMin, p0.z + dz * tMin));
+  if (tMax - tMin > 1e-4) {
+    outPts.push(new THREE.Vector3(p0.x + dx * tMax, p0.y + dy * tMax, p0.z + dz * tMax));
+  }
+}
+
+function reduceManifoldPoints(rawPts, normal) {
+  if (rawPts.length <= 1) return rawPts;
+  const unique = [];
+  for (const p of rawPts) {
+    let dup = false;
+    for (const u of unique) {
+      const dx = p.x - u.x, dy = p.y - u.y, dz = p.z - u.z;
+      if (dx * dx + dy * dy + dz * dz < 0.012 * 0.012) {
+        dup = true;
+        break;
+      }
+    }
+    if (!dup) unique.push(p);
+  }
+  if (unique.length <= 4) return unique;
+
+  const ref = Math.abs(normal.y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
+  const t1 = new THREE.Vector3().crossVectors(normal, ref).normalize();
+  const t2 = new THREE.Vector3().crossVectors(normal, t1).normalize();
+
+  let cx = 0, cy = 0, cz = 0;
+  for (const p of unique) {
+    cx += p.x;
+    cy += p.y;
+    cz += p.z;
+  }
+  cx /= unique.length;
+  cy /= unique.length;
+  cz /= unique.length;
+
+  let i0 = 0, bestD0 = -1;
+  for (let i = 0; i < unique.length; i++) {
+    const p = unique[i];
+    const d = (p.x - cx) ** 2 + (p.y - cy) ** 2 + (p.z - cz) ** 2;
+    if (d > bestD0) {
+      bestD0 = d;
+      i0 = i;
+    }
+  }
+  let i1 = i0, bestD1 = -1;
+  for (let i = 0; i < unique.length; i++) {
+    const d = unique[i].distanceToSquared(unique[i0]);
+    if (d > bestD1) {
+      bestD1 = d;
+      i1 = i;
+    }
+  }
+  if (i1 === i0) return [unique[i0]];
+
+  const p0 = unique[i0], p1 = unique[i1];
+  const u0 = p0.dot(t1), v0 = p0.dot(t2);
+  const du = p1.dot(t1) - u0, dv = p1.dot(t2) - v0;
+
+  let i2 = -1, maxPos = 1e-6;
+  let i3 = -1, minNeg = -1e-6;
+  for (let i = 0; i < unique.length; i++) {
+    if (i === i0 || i === i1) continue;
+    const area = (unique[i].dot(t1) - u0) * dv - (unique[i].dot(t2) - v0) * du;
+    if (area > maxPos) {
+      maxPos = area;
+      i2 = i;
+    }
+    if (area < minNeg) {
+      minNeg = area;
+      i3 = i;
+    }
+  }
+  const out = [p0, p1];
+  if (i2 !== -1) out.push(unique[i2]);
+  if (i3 !== -1) out.push(unique[i3]);
+  return out;
+}
+
+function testOBBCollision(obbA, obbB, clipMargin = 0.003) {
+  if (
+    obbA.maxX < obbB.minX || obbA.minX > obbB.maxX ||
+    obbA.maxY < obbB.minY || obbA.minY > obbB.maxY ||
+    obbA.maxZ < obbB.minZ || obbA.minZ > obbB.maxZ
+  ) {
+    return null;
+  }
+
+  const diffX = obbA.center.x - obbB.center.x;
+  const diffY = obbA.center.y - obbB.center.y;
+  const diffZ = obbA.center.z - obbB.center.z;
+
+  let minOverlap = Infinity;
+  let bestX = 0, bestY = 1, bestZ = 0;
+
+  for (let i = 0; i < 3; i++) {
+    const a = obbA.axes[i];
+    const pA = projectOBBOnAxis(obbA, a.x, a.y, a.z);
+    const pB = projectOBBOnAxis(obbB, a.x, a.y, a.z);
     const overlap = Math.min(pA.max, pB.max) - Math.max(pA.min, pB.min);
     if (overlap <= 0) return null;
     if (overlap < minOverlap) {
       minOverlap = overlap;
-      bestAxis = ax.clone();
+      bestX = a.x; bestY = a.y; bestZ = a.z;
+    }
+
+    const b = obbB.axes[i];
+    const pA2 = projectOBBOnAxis(obbA, b.x, b.y, b.z);
+    const pB2 = projectOBBOnAxis(obbB, b.x, b.y, b.z);
+    const overlap2 = Math.min(pA2.max, pB2.max) - Math.max(pA2.min, pB2.min);
+    if (overlap2 <= 0) return null;
+    if (overlap2 < minOverlap) {
+      minOverlap = overlap2;
+      bestX = b.x; bestY = b.y; bestZ = b.z;
     }
   }
 
-  if (!bestAxis) return null;
-  if (diff.dot(bestAxis) < 0) bestAxis.negate(); // Нормаль от B к A
-
-  // Находим реальные точки контакта между досками (для расчёта плеча силы и опрокидывания)
-  const contactPts = [];
-  for (const c of obbA.corners) {
-    if (pointInsideOBBMargin(c, obbB, 0.04)) contactPts.push(c);
+  for (let i = 0; i < 3; i++) {
+    const ai = obbA.axes[i];
+    for (let j = 0; j < 3; j++) {
+      const bj = obbB.axes[j];
+      let cx = ai.y * bj.z - ai.z * bj.y;
+      let cy = ai.z * bj.x - ai.x * bj.z;
+      let cz = ai.x * bj.y - ai.y * bj.x;
+      const lenSq = cx * cx + cy * cy + cz * cz;
+      if (lenSq > 1e-4) {
+        const invL = 1 / Math.sqrt(lenSq);
+        cx *= invL; cy *= invL; cz *= invL;
+        const pA = projectOBBOnAxis(obbA, cx, cy, cz);
+        const pB = projectOBBOnAxis(obbB, cx, cy, cz);
+        const overlap = Math.min(pA.max, pB.max) - Math.max(pA.min, pB.min);
+        if (overlap <= 0) return null;
+        if (overlap < minOverlap - 0.0005) {
+          minOverlap = overlap;
+          bestX = cx; bestY = cy; bestZ = cz;
+        }
+      }
+    }
   }
-  for (const c of obbB.corners) {
-    if (pointInsideOBBMargin(c, obbA, 0.04)) contactPts.push(c);
+
+  if (diffX * bestX + diffY * bestY + diffZ * bestZ < 0) {
+    bestX = -bestX;
+    bestY = -bestY;
+    bestZ = -bestZ;
+  }
+  const bestAxis = new THREE.Vector3(bestX, bestY, bestZ);
+
+  const rawPts = [];
+  for (const [ia, ib] of OBB_EDGE_INDICES) {
+    clipSegmentToOBB(obbA.verts8[ia], obbA.verts8[ib], obbB, clipMargin, rawPts);
+    clipSegmentToOBB(obbB.verts8[ia], obbB.verts8[ib], obbA, clipMargin, rawPts);
   }
 
+  let points;
   const contactPoint = new THREE.Vector3();
-  if (contactPts.length > 0) {
-    for (const p of contactPts) contactPoint.add(p);
-    contactPoint.divideScalar(contactPts.length);
+  if (rawPts.length > 0) {
+    points = reduceManifoldPoints(rawPts, bestAxis);
+    for (const p of points) contactPoint.add(p);
+    contactPoint.divideScalar(points.length);
   } else {
     const pOnB = clampPointToOBB(obbA.center, obbB);
     const pOnA = clampPointToOBB(pOnB, obbA);
     contactPoint.addVectors(pOnA, pOnB).multiplyScalar(0.5);
+    points = [contactPoint.clone()];
   }
 
   return {
-    normal: bestAxis, // направлена от B к A
+    normal: bestAxis,
     depth: minOverlap,
-    point: contactPoint
+    point: contactPoint,
+    points
   };
+}
+
+function buildConvexHullXZ(pts2d) {
+  if (pts2d.length === 0) return [];
+  const sorted = pts2d.slice().sort((a, b) => (a.x !== b.x ? a.x - b.x : a.z - b.z));
+  const unique = [sorted[0]];
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = unique[unique.length - 1];
+    if (Math.hypot(sorted[i].x - prev.x, sorted[i].z - prev.z) > 0.004) {
+      unique.push(sorted[i]);
+    }
+  }
+  if (unique.length <= 2) return unique;
+  const cross = (o, a, b) => (a.x - o.x) * (b.z - o.z) - (a.z - o.z) * (b.x - o.x);
+  const lower = [];
+  for (const p of unique) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+    lower.push(p);
+  }
+  const upper = [];
+  for (let i = unique.length - 1; i >= 0; i--) {
+    const p = unique[i];
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
+    upper.push(p);
+  }
+  lower.pop();
+  upper.pop();
+  return lower.concat(upper);
+}
+
+function clampPointToHullXZ(px, pz, pts3d, extraPts2d) {
+  let avgY = 0;
+  for (const p of pts3d) avgY += p.y;
+  avgY /= pts3d.length;
+
+  const combined = extraPts2d && extraPts2d.length > 0 ? pts3d.concat(extraPts2d) : pts3d;
+  const hull = buildConvexHullXZ(combined);
+  if (hull.length === 0) return new THREE.Vector3(px, avgY, pz);
+  if (hull.length === 1) return new THREE.Vector3(hull[0].x, avgY, hull[0].z);
+  if (hull.length === 2) {
+    const a = hull[0], b = hull[1];
+    const abx = b.x - a.x, abz = b.z - a.z;
+    const lenSq = abx * abx + abz * abz;
+    const t = lenSq > 1e-8 ? Math.max(0, Math.min(1, ((px - a.x) * abx + (pz - a.z) * abz) / lenSq)) : 0;
+    return new THREE.Vector3(a.x + abx * t, avgY, a.z + abz * t);
+  }
+
+  let inside = true;
+  let bestX = px, bestZ = pz, bestDistSq = Infinity;
+  for (let i = 0; i < hull.length; i++) {
+    const a = hull[i];
+    const b = hull[(i + 1) % hull.length];
+    const ex = b.x - a.x, ez = b.z - a.z;
+    const signedArea = ex * (pz - a.z) - ez * (px - a.x);
+    if (signedArea < 0) inside = false;
+
+    const lenSq = ex * ex + ez * ez;
+    const t = lenSq > 1e-8 ? Math.max(0, Math.min(1, ((px - a.x) * ex + (pz - a.z) * ez) / lenSq)) : 0;
+    const cx = a.x + ex * t, cz = a.z + ez * t;
+    const dSq = (px - cx) * (px - cx) + (pz - cz) * (pz - cz);
+    if (dSq < bestDistSq) {
+      bestDistSq = dSq;
+      bestX = cx;
+      bestZ = cz;
+    }
+  }
+  return inside ? new THREE.Vector3(px, avgY, pz) : new THREE.Vector3(bestX, avgY, bestZ);
+}
+
+function isComInsideSupportHullXZ(comX, comZ, pts2d, margin = 0.035) {
+  const hull = buildConvexHullXZ(pts2d);
+  if (hull.length < 3) return false;
+  for (let i = 0; i < hull.length; i++) {
+    const a = hull[i];
+    const b = hull[(i + 1) % hull.length];
+    const ex = b.x - a.x, ez = b.z - a.z;
+    const len = Math.hypot(ex, ez);
+    if (len < 1e-6) continue;
+    const signedArea = ex * (comZ - a.z) - ez * (comX - a.x);
+    if (signedArea / len < -margin) return false;
+  }
+  return true;
 }
 
 function applyBodyRotationDelta(body, angDelta) {
@@ -2957,15 +3246,65 @@ function applyBodyRotationDelta(body, angDelta) {
     pl.qz = q.z;
     pl.qw = q.w;
   }
+  body.obbDirty = true;
 }
 
 function translateBody(body, delta) {
+  if (Math.abs(delta.x) < 1e-9 && Math.abs(delta.y) < 1e-9 && Math.abs(delta.z) < 1e-9) return;
   body.com.add(delta);
   for (const pl of body.members) {
     pl.x += delta.x;
     pl.y += delta.y;
     pl.z += delta.z;
   }
+  body.obbDirty = true;
+}
+
+function solveGroundPositionForBody(body) {
+  for (let posIter = 0; posIter < 4; posIter++) {
+    const linCorr = new THREE.Vector3();
+    const angCorr = new THREE.Vector3();
+    let penCount = 0;
+    for (const pl of body.members) {
+      const pts = getPlankGroundPoints(pl);
+      for (const pt of pts) {
+        const gY = getTerrainHeight(pt.x, pt.z);
+        const pen = gY - pt.y;
+        if (pen > 0.0003) {
+          penCount++;
+          const gx = getTerrainHeight(pt.x + 0.25, pt.z) - gY;
+          const gz = getTerrainHeight(pt.x, pt.z + 0.25) - gY;
+          const n = new THREE.Vector3(-gx * 4, 1, -gz * 4).normalize();
+          const r = pt.clone().sub(body.com);
+          const rXn = new THREE.Vector3().crossVectors(r, n);
+          const k = body.invMass + rXn.lengthSq() * body.invInertia;
+          const dp = ((pen - 0.0003) * 0.7) / k;
+          linCorr.addScaledVector(n, dp * body.invMass);
+          angCorr.addScaledVector(rXn, dp * body.invInertia);
+        }
+      }
+    }
+    if (penCount === 0) break;
+    translateBody(body, linCorr.multiplyScalar(1 / penCount));
+    applyBodyRotationDelta(body, angCorr.multiplyScalar(1 / penCount));
+  }
+
+  let maxRemPen = 0;
+  const groundPts = [];
+  for (const pl of body.members) {
+    const pts = getPlankGroundPoints(pl);
+    for (const pt of pts) {
+      const gY = getTerrainHeight(pt.x, pt.z);
+      const pen = gY - pt.y;
+      if (pen > maxRemPen) maxRemPen = pen;
+      if (pt.y <= gY + 0.012) groundPts.push({ x: pt.x, z: pt.z });
+    }
+  }
+  if (maxRemPen > 0) {
+    translateBody(body, new THREE.Vector3(0, maxRemPen, 0));
+  }
+  body.touchingGround = groundPts.length > 0 || maxRemPen > 0;
+  body.groundSupportPts = groundPts;
 }
 
 let physicsSaveTimer = 0;
@@ -2978,7 +3317,7 @@ function stepPlanksPhysics(dt) {
   const subSteps = 4;
   const subDt = simDt / subSteps;
 
-  // 1. Формируем твёрдые тела (Rigid Bodies) по группам склеенных досок один раз перед подшагами
+  // 1. Формируем твёрдые тела (Rigid Bodies) по группам склеенных досок
   const groupMap = new Map();
   for (const pl of plankList) {
     const gid = pl.groupId || `grp_${pl.id}`;
@@ -3005,7 +3344,6 @@ function stepPlanksPhysics(dt) {
     const mass = members.length * 1.0;
     const invMass = isGrabbed ? 0 : 1.0 / mass;
 
-    // Реальный момент инерции по теореме Гюйгенса — Штейнера (с учётом плеч сбитых досок)
     let totalInertia = 0;
     for (const pl of members) {
       const w = pl.w || 2.4;
@@ -3020,7 +3358,6 @@ function stepPlanksPhysics(dt) {
     const distSqToPlayer = state.started
       ? (com.x - state.x) * (com.x - state.x) + (com.z - state.z) * (com.z - state.z)
       : 0;
-    // Отключаем физику только для очень далёких объектов (> 110м); рядом с игроком гравитация работает всегда (без левитации!)
     const isFarInactive = !isGrabbed && distSqToPlayer > 110 * 110;
 
     bodies.set(gid, {
@@ -3028,6 +3365,10 @@ function stepPlanksPhysics(dt) {
       members,
       isGrabbed,
       isFarInactive,
+      touchingGround: false,
+      groundSupportPts: [],
+      verticallySupported: isGrabbed,
+      obbDirty: true,
       com,
       vel,
       angVel,
@@ -3036,7 +3377,6 @@ function stepPlanksPhysics(dt) {
     });
   }
 
-  // Отбираем только доски в радиусе 110м от игрока для коллизий и скрываем 3D-меши далёких досок (> 165м)
   const nearbyPlanks = [];
   for (const pl of plankList) {
     const b = bodies.get(pl.groupId);
@@ -3049,8 +3389,29 @@ function stepPlanksPhysics(dt) {
     }
   }
 
+  const obbCache = new Map();
+  const getOBB = (pl) => {
+    const b = bodies.get(pl.groupId);
+    if (b && b.obbDirty) {
+      for (const m of b.members) obbCache.set(m.id, buildPlankOBB(m, 0));
+      b.obbDirty = false;
+    }
+    let obb = obbCache.get(pl.id);
+    if (!obb) {
+      obb = buildPlankOBB(pl, 0);
+      obbCache.set(pl.id, obb);
+    }
+    return obb;
+  };
+
+  const holdingBuildTool =
+    state.heldItem === "nails" ||
+    state.heldItem === "hammer" ||
+    state.heldItem === "plank" ||
+    state.heldItem === "saw";
+
   for (let step = 0; step < subSteps; step++) {
-    // 2. Интеграция внешних сил (гравитация + плавное затухание) и перемещения
+    // 2. Интеграция гравитации и перемещения
     for (const body of bodies.values()) {
       if (body.isGrabbed || body.isFarInactive) continue;
       body.vel.y -= 16.5 * subDt;
@@ -3061,24 +3422,24 @@ function stepPlanksPhysics(dt) {
       applyBodyRotationDelta(body, body.angVel.clone().multiplyScalar(subDt));
     }
 
-    // 3. Столкновение игрока с досками (игрок может толкать незакреплённые доски ногами/корпусом)
-    if (state.started) {
+    // 3. Мягкое горизонтальное столкновение игрока с высокими препятствиями (не сбиваем лежащие стопки досок и не мешаем забивать гвозди)
+    if (state.started && !holdingBuildTool) {
       const playerCenter = new THREE.Vector3(state.x, state.y + 0.55, state.z);
       for (const body of bodies.values()) {
         if (body.isGrabbed || body.isFarInactive) continue;
         if (body.com.distanceToSquared(playerCenter) > 16.0) continue;
         for (const pl of body.members) {
-          const obb = buildPlankOBB(pl);
+          const obb = getOBB(pl);
           const closest = clampPointToOBB(playerCenter, obb);
           const diff = closest.clone().sub(playerCenter);
-          diff.y *= 0.5;
+          diff.y = 0;
           const dist = diff.length();
-          if (dist > 0.001 && dist < 0.42 && closest.y > state.y + 0.18) {
-            const pushDir = diff.normalize();
-            const pushDepth = 0.42 - dist;
-            translateBody(body, pushDir.clone().multiplyScalar(pushDepth * 0.45));
+          if (dist > 0.001 && dist < 0.38 && closest.y > state.y + 0.42) {
+            const pushDir = diff.multiplyScalar(1 / dist);
+            const pushDepth = 0.38 - dist;
+            translateBody(body, pushDir.clone().multiplyScalar(pushDepth * 0.4));
             const r = closest.clone().sub(body.com);
-            const impulse = pushDir.clone().multiplyScalar(0.85);
+            const impulse = pushDir.clone().multiplyScalar(0.65);
             body.vel.addScaledVector(impulse, body.invMass);
             body.angVel.addScaledVector(new THREE.Vector3().crossVectors(r, impulse), body.invInertia);
           }
@@ -3086,240 +3447,413 @@ function stepPlanksPhysics(dt) {
       }
     }
 
-    // 4. Коллизии досок друг с другом только среди ближних активных досок (ускоряет физику в 20 раз при тысячах досок на сервере)
-    for (let i = 0; i < nearbyPlanks.length; i++) {
-      for (let j = i + 1; j < nearbyPlanks.length; j++) {
+    // 4. Сначала выравниваем нижние доски по рельефу земли
+    for (const body of bodies.values()) {
+      if (body.isGrabbed || body.isFarInactive) continue;
+      solveGroundPositionForBody(body);
+      body.verticallySupported = body.touchingGround;
+    }
+
+    // Сортируем ближние доски снизу вверх, чтобы стопки разрешались от фундамента к верхним ярусам
+    nearbyPlanks.sort((a, b) => a.y - b.y);
+
+    // 5. Позиционное разделение досок друг с другом (строго вертикальный подъём на стопках — 0.0000м горизонтального съезжания!)
+    for (let pPass = 0; pPass < 2; pPass++) {
+      for (let i = 0; i < nearbyPlanks.length; i++) {
         const plA = nearbyPlanks[i];
+        const bodyA = bodies.get(plA.groupId);
+        if (!bodyA) continue;
+
+        for (let j = i + 1; j < nearbyPlanks.length; j++) {
+          const plB = nearbyPlanks[j];
+          if (plA.groupId === plB.groupId) continue;
+
+          const bodyB = bodies.get(plB.groupId);
+          if (!bodyB) continue;
+          if ((bodyA.isGrabbed || bodyA.isFarInactive) && (bodyB.isGrabbed || bodyB.isFarInactive)) continue;
+
+          const dx = plA.x - plB.x;
+          const dz = plA.z - plB.z;
+          if (dx * dx + dz * dz > 26.0) continue;
+
+          const obbA = getOBB(plA);
+          const obbB = getOBB(plB);
+          const col = testOBBCollision(obbA, obbB, 0.003);
+          if (!col) continue;
+
+          const n = col.normal;
+          const slop = 0.0005;
+
+          if (Math.abs(n.y) > 0.55) {
+            const aIsUpper = n.y > 0;
+            const upper = aIsUpper ? bodyA : bodyB;
+            const lower = aIsUpper ? bodyB : bodyA;
+            const absNy = Math.abs(n.y);
+
+            if (lower.verticallySupported || lower.isGrabbed) {
+              upper.verticallySupported = true;
+            }
+
+            if (col.depth > slop) {
+              const effUpperInvM = upper.invMass;
+              const effLowerInvM = lower.verticallySupported || lower.isGrabbed ? 0 : lower.invMass;
+              const effUpperInvI = upper.invInertia;
+              const effLowerInvI = lower.verticallySupported || lower.isGrabbed ? 0 : lower.invInertia;
+
+              const cop = clampPointToHullXZ(upper.com.x, upper.com.z, col.points, upper.groundSupportPts);
+              const rU = cop.clone().sub(upper.com);
+              const rL = cop.clone().sub(lower.com);
+              const rUxUp = new THREE.Vector3().crossVectors(rU, WORLD_UP);
+              const rLxUp = new THREE.Vector3().crossVectors(rL, WORLD_UP);
+
+              const overhangDistSq = (cop.x - upper.com.x) ** 2 + (cop.z - upper.com.z) ** 2;
+              const rotFactor = overhangDistSq > 0.0003 ? 0.75 : 0.0;
+
+              const denom =
+                effUpperInvM +
+                effLowerInvM +
+                (rUxUp.lengthSq() * effUpperInvI + rLxUp.lengthSq() * effLowerInvI) * rotFactor;
+
+              if (denom > 1e-8) {
+                const reqLift = (col.depth - slop) / absNy;
+                const posImp = (reqLift * 0.75) / denom;
+                if (effUpperInvM > 0) {
+                  translateBody(upper, new THREE.Vector3(0, posImp * effUpperInvM, 0));
+                  if (rotFactor > 0) {
+                    applyBodyRotationDelta(upper, rUxUp.multiplyScalar(posImp * effUpperInvI * rotFactor));
+                  }
+                }
+                if (effLowerInvM > 0) {
+                  translateBody(lower, new THREE.Vector3(0, -posImp * effLowerInvM, 0));
+                  if (rotFactor > 0) {
+                    applyBodyRotationDelta(lower, rLxUp.multiplyScalar(-posImp * effLowerInvI * rotFactor));
+                  }
+                }
+              }
+            }
+          } else if (col.depth > slop) {
+            const totalInvM = bodyA.invMass + bodyB.invMass;
+            if (totalInvM > 1e-8) {
+              const posImp = ((col.depth - slop) * 0.6) / totalInvM;
+              if (bodyA.invMass > 0) translateBody(bodyA, n.clone().multiplyScalar(posImp * bodyA.invMass));
+              if (bodyB.invMass > 0) translateBody(bodyB, n.clone().multiplyScalar(-posImp * bodyB.invMass));
+            }
+          }
+        }
+      }
+
+      for (const body of bodies.values()) {
+        if (body.isGrabbed || body.isFarInactive) continue;
+        solveGroundPositionForBody(body);
+      }
+    }
+
+    // 6. Собираем контактные манифолды (земля + доска-о-доску) для совместного солвера импульсов и сухого трения
+    const groundManifolds = [];
+    const supportCandidates = new Map();
+    for (const gid of bodies.keys()) supportCandidates.set(gid, []);
+
+    for (const body of bodies.values()) {
+      if (body.isGrabbed || body.isFarInactive) continue;
+      const contacts = [];
+      for (const pl of body.members) {
+        const pts = getPlankGroundPoints(pl);
+        for (const pt of pts) {
+          const gY = getTerrainHeight(pt.x, pt.z);
+          if (pt.y <= gY + 0.012) {
+            const gx = getTerrainHeight(pt.x + 0.25, pt.z) - gY;
+            const gz = getTerrainHeight(pt.x, pt.z + 0.25) - gY;
+            const n = new THREE.Vector3(-gx * 4, 1, -gz * 4).normalize();
+            const ref = Math.abs(n.y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
+            const t1 = new THREE.Vector3().crossVectors(n, ref).normalize();
+            const t2 = new THREE.Vector3().crossVectors(n, t1).normalize();
+            const r = pt.clone().sub(body.com);
+            const rXn = new THREE.Vector3().crossVectors(r, n);
+            const rXt1 = new THREE.Vector3().crossVectors(r, t1);
+            const rXt2 = new THREE.Vector3().crossVectors(r, t2);
+            contacts.push({
+              nx: n.x, ny: n.y, nz: n.z,
+              t1x: t1.x, t1y: t1.y, t1z: t1.z,
+              t2x: t2.x, t2y: t2.y, t2z: t2.z,
+              rx: r.x, ry: r.y, rz: r.z,
+              kN: body.invMass + rXn.lengthSq() * body.invInertia,
+              kT1: body.invMass + rXt1.lengthSq() * body.invInertia,
+              kT2: body.invMass + rXt2.lengthSq() * body.invInertia,
+              jnAcc: 0, jt1Acc: 0, jt2Acc: 0
+            });
+            if (n.y > 0.55) {
+              supportCandidates.get(body.gid).push({ x: pt.x, z: pt.z, fromGid: "GROUND" });
+            }
+          }
+        }
+      }
+      if (contacts.length > 0) {
+        const weight = 1 / Math.max(1, Math.min(4, contacts.length * 0.5));
+        groundManifolds.push({ body, contacts, weight });
+      }
+    }
+
+    const velObbCache = new Map();
+    for (const pl of nearbyPlanks) velObbCache.set(pl.id, buildPlankOBB(pl, 0.0015));
+
+    const plankManifolds = [];
+    for (let i = 0; i < nearbyPlanks.length; i++) {
+      const plA = nearbyPlanks[i];
+      const bodyA = bodies.get(plA.groupId);
+      if (!bodyA) continue;
+      const obbA = velObbCache.get(plA.id);
+
+      for (let j = i + 1; j < nearbyPlanks.length; j++) {
         const plB = nearbyPlanks[j];
         if (plA.groupId === plB.groupId) continue;
 
-        const bodyA = bodies.get(plA.groupId);
         const bodyB = bodies.get(plB.groupId);
-        if (!bodyA || !bodyB) continue;
+        if (!bodyB) continue;
         if ((bodyA.isGrabbed || bodyA.isFarInactive) && (bodyB.isGrabbed || bodyB.isFarInactive)) continue;
 
-        const dx = plA.x - plB.x;
-        const dy = plA.y - plB.y;
-        const dz = plA.z - plB.z;
-        if (dx * dx + dy * dy + dz * dz > 26.0) continue;
-
-        const obbA = buildPlankOBB(plA);
-        const obbB = buildPlankOBB(plB);
-        const col = testOBBCollision(obbA, obbB);
+        const obbB = velObbCache.get(plB.id);
+        const col = testOBBCollision(obbA, obbB, 0.003);
         if (!col) continue;
 
         const n = col.normal;
         const totalInvMass = bodyA.invMass + bodyB.invMass;
         if (totalInvMass <= 0) continue;
 
-        const rA = col.point.clone().sub(bodyA.com);
-        const rB = col.point.clone().sub(bodyB.com);
-        const rAxN = new THREE.Vector3().crossVectors(rA, n);
-        const rBxN = new THREE.Vector3().crossVectors(rB, n);
         const isVerticalStack = Math.abs(n.y) > 0.35;
         const rotScale = isVerticalStack ? 1.0 : 0.0;
+        const ref = Math.abs(n.y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
+        const t1 = new THREE.Vector3().crossVectors(n, ref).normalize();
+        const t2 = new THREE.Vector3().crossVectors(n, t1).normalize();
 
-        const denom =
-          totalInvMass +
-          (rAxN.lengthSq() * bodyA.invInertia + rBxN.lengthSq() * bodyB.invInertia) * rotScale;
+        const cps = [];
+        for (const pt of col.points) {
+          const rA = pt.clone().sub(bodyA.com);
+          const rB = pt.clone().sub(bodyB.com);
+          const rAxN = new THREE.Vector3().crossVectors(rA, n);
+          const rBxN = new THREE.Vector3().crossVectors(rB, n);
+          const rAxT1 = new THREE.Vector3().crossVectors(rA, t1);
+          const rBxT1 = new THREE.Vector3().crossVectors(rB, t1);
+          const rAxT2 = new THREE.Vector3().crossVectors(rA, t2);
+          const rBxT2 = new THREE.Vector3().crossVectors(rB, t2);
+          cps.push({
+            rAx: rA.x, rAy: rA.y, rAz: rA.z,
+            rBx: rB.x, rBy: rB.y, rBz: rB.z,
+            kN: totalInvMass + (rAxN.lengthSq() * bodyA.invInertia + rBxN.lengthSq() * bodyB.invInertia) * rotScale,
+            kT1: totalInvMass + (rAxT1.lengthSq() * bodyA.invInertia + rBxT1.lengthSq() * bodyB.invInertia) * rotScale,
+            kT2: totalInvMass + (rAxT2.lengthSq() * bodyA.invInertia + rBxT2.lengthSq() * bodyB.invInertia) * rotScale,
+            jnAcc: 0, jt1Acc: 0, jt2Acc: 0
+          });
 
-        // Позиционное разделение: при наложении сверху учитываем рычаг (чтобы висящий край опрокидывался, а не левитировал!)
-        const slop = 0.0015;
-        if (col.depth > slop) {
-          const posImpulse = ((col.depth - slop) * 0.6) / denom;
-          if (bodyA.invMass > 0) {
-            translateBody(bodyA, n.clone().multiplyScalar(posImpulse * bodyA.invMass));
-            if (isVerticalStack) {
-              applyBodyRotationDelta(bodyA, rAxN.clone().multiplyScalar(posImpulse * bodyA.invInertia * 0.75));
-            }
-          }
-          if (bodyB.invMass > 0) {
-            translateBody(bodyB, n.clone().multiplyScalar(-posImpulse * bodyB.invMass));
-            if (isVerticalStack) {
-              applyBodyRotationDelta(bodyB, rBxN.clone().multiplyScalar(-posImpulse * bodyB.invInertia * 0.75));
-            }
+          if (n.y > 0.58 && !bodyB.isGrabbed) {
+            supportCandidates.get(bodyA.gid).push({ x: pt.x, z: pt.z, fromGid: bodyB.gid });
+          } else if (n.y < -0.58 && !bodyA.isGrabbed) {
+            supportCandidates.get(bodyB.gid).push({ x: pt.x, z: pt.z, fromGid: bodyA.gid });
           }
         }
 
-        const velAtA = bodyA.vel.clone().add(new THREE.Vector3().crossVectors(bodyA.angVel, rA));
-        const velAtB = bodyB.vel.clone().add(new THREE.Vector3().crossVectors(bodyB.angVel, rB));
-        const relVel = velAtA.sub(velAtB);
-        const vn = relVel.dot(n);
+        plankManifolds.push({
+          bodyA,
+          bodyB,
+          nx: n.x, ny: n.y, nz: n.z,
+          t1x: t1.x, t1y: t1.y, t1z: t1.z,
+          t2x: t2.x, t2y: t2.y, t2z: t2.z,
+          rotScale,
+          cps
+        });
+      }
+    }
 
-        if (vn < 0) {
-          const jn = -vn / denom;
-          const impulseN = n.clone().multiplyScalar(jn);
+    // 7. Совместный итеративный солвер скоростей и 2D сухого трения Кулона (земля + дерево о дерево)
+    const solveGroundPass = () => {
+      for (const gm of groundManifolds) {
+        const { body, contacts, weight } = gm;
+        const invM = body.invMass, invI = body.invInertia;
+        let dvx = 0, dvy = 0, dvz = 0, dwx = 0, dwy = 0, dwz = 0;
+        const vx = body.vel.x, vy = body.vel.y, vz = body.vel.z;
+        const wx = body.angVel.x, wy = body.angVel.y, wz = body.angVel.z;
 
-          if (bodyA.invMass > 0) {
-            bodyA.vel.addScaledVector(impulseN, bodyA.invMass);
-            bodyA.angVel.addScaledVector(new THREE.Vector3().crossVectors(rA, impulseN), bodyA.invInertia * rotScale);
+        for (const c of contacts) {
+          const vpx = vx + (wy * c.rz - wz * c.ry);
+          const vpy = vy + (wz * c.rx - wx * c.rz);
+          const vpz = vz + (wx * c.ry - wy * c.rx);
+          const vn = vpx * c.nx + vpy * c.ny + vpz * c.nz;
+          const dj = (-vn / c.kN) * weight;
+          const newJn = c.jnAcc + dj > 0 ? c.jnAcc + dj : 0;
+          const actualJn = newJn - c.jnAcc;
+          c.jnAcc = newJn;
+          if (actualJn !== 0) {
+            const ix = c.nx * actualJn, iy = c.ny * actualJn, iz = c.nz * actualJn;
+            dvx += ix * invM; dvy += iy * invM; dvz += iz * invM;
+            dwx += (c.ry * iz - c.rz * iy) * invI;
+            dwy += (c.rz * ix - c.rx * iz) * invI;
+            dwz += (c.rx * iy - c.ry * ix) * invI;
           }
-          if (bodyB.invMass > 0) {
-            bodyB.vel.addScaledVector(impulseN, -bodyB.invMass);
-            bodyB.angVel.addScaledVector(new THREE.Vector3().crossVectors(rB, impulseN.clone().negate()), bodyB.invInertia * rotScale);
-          }
+        }
+        body.vel.x += dvx; body.vel.y += dvy; body.vel.z += dvz;
+        body.angVel.x += dwx; body.angVel.y += dwy; body.angVel.z += dwz;
 
-          // Трение дерева о дерево
-          const tangent = relVel.clone().addScaledVector(n, -vn);
-          const tLen = tangent.length();
-          if (tLen > 1e-5) {
-            tangent.multiplyScalar(1 / tLen);
-            const rAxT = new THREE.Vector3().crossVectors(rA, tangent);
-            const rBxT = new THREE.Vector3().crossVectors(rB, tangent);
-            const denomT =
-              totalInvMass +
-              (rAxT.lengthSq() * bodyA.invInertia + rBxT.lengthSq() * bodyB.invInertia) * rotScale;
-            const jtMax = jn * 0.65;
-            const jt = Math.max(-jtMax, Math.min(jtMax, -relVel.dot(tangent) / denomT));
-            const impulseT = tangent.multiplyScalar(jt);
-            if (bodyA.invMass > 0) {
-              bodyA.vel.addScaledVector(impulseT, bodyA.invMass);
-              bodyA.angVel.addScaledVector(new THREE.Vector3().crossVectors(rA, impulseT), bodyA.invInertia * rotScale);
+        let fvx = 0, fvy = 0, fvz = 0, fwx = 0, fwy = 0, fwz = 0;
+        const vx2 = body.vel.x, vy2 = body.vel.y, vz2 = body.vel.z;
+        const wx2 = body.angVel.x, wy2 = body.angVel.y, wz2 = body.angVel.z;
+        for (const c of contacts) {
+          if (c.jnAcc <= 0) continue;
+          const vpx = vx2 + (wy2 * c.rz - wz2 * c.ry);
+          const vpy = vy2 + (wz2 * c.rx - wx2 * c.rz);
+          const vpz = vz2 + (wx2 * c.ry - wy2 * c.rx);
+          const vt1 = vpx * c.t1x + vpy * c.t1y + vpz * c.t1z;
+          const vt2 = vpx * c.t2x + vpy * c.t2y + vpz * c.t2z;
+          let newJt1 = c.jt1Acc + (-vt1 / c.kT1) * weight;
+          let newJt2 = c.jt2Acc + (-vt2 / c.kT2) * weight;
+          const maxJt = c.jnAcc * 0.90;
+          const magSq = newJt1 * newJt1 + newJt2 * newJt2;
+          if (magSq > maxJt * maxJt && magSq > 1e-18) {
+            const s = maxJt / Math.sqrt(magSq);
+            newJt1 *= s;
+            newJt2 *= s;
+          }
+          const dJt1 = newJt1 - c.jt1Acc;
+          const dJt2 = newJt2 - c.jt2Acc;
+          c.jt1Acc = newJt1;
+          c.jt2Acc = newJt2;
+          if (dJt1 !== 0 || dJt2 !== 0) {
+            const ix = c.t1x * dJt1 + c.t2x * dJt2;
+            const iy = c.t1y * dJt1 + c.t2y * dJt2;
+            const iz = c.t1z * dJt1 + c.t2z * dJt2;
+            fvx += ix * invM; fvy += iy * invM; fvz += iz * invM;
+            fwx += (c.ry * iz - c.rz * iy) * invI;
+            fwy += (c.rz * ix - c.rx * iz) * invI;
+            fwz += (c.rx * iy - c.ry * ix) * invI;
+          }
+        }
+        body.vel.x += fvx; body.vel.y += fvy; body.vel.z += fvz;
+        body.angVel.x += fwx; body.angVel.y += fwy; body.angVel.z += fwz;
+      }
+    };
+
+    for (let vIter = 0; vIter < 8; vIter++) {
+      solveGroundPass();
+      for (const pm of plankManifolds) {
+        const { bodyA, bodyB, nx, ny, nz, t1x, t1y, t1z, t2x, t2y, t2z, rotScale, cps } = pm;
+        const invMA = bodyA.invMass, invIA = bodyA.invInertia * rotScale;
+        const invMB = bodyB.invMass, invIB = bodyB.invInertia * rotScale;
+
+        for (const cp of cps) {
+          const vAx = bodyA.vel.x + (bodyA.angVel.y * cp.rAz - bodyA.angVel.z * cp.rAy);
+          const vAy = bodyA.vel.y + (bodyA.angVel.z * cp.rAx - bodyA.angVel.x * cp.rAz);
+          const vAz = bodyA.vel.z + (bodyA.angVel.x * cp.rAy - bodyA.angVel.y * cp.rAx);
+          const vBx = bodyB.vel.x + (bodyB.angVel.y * cp.rBz - bodyB.angVel.z * cp.rBy);
+          const vBy = bodyB.vel.y + (bodyB.angVel.z * cp.rBx - bodyB.angVel.x * cp.rBz);
+          const vBz = bodyB.vel.z + (bodyB.angVel.x * cp.rBy - bodyB.angVel.y * cp.rBx);
+
+          const vn = (vAx - vBx) * nx + (vAy - vBy) * ny + (vAz - vBz) * nz;
+          const dJn = -vn / cp.kN;
+          const newJn = cp.jnAcc + dJn > 0 ? cp.jnAcc + dJn : 0;
+          const actualJn = newJn - cp.jnAcc;
+          cp.jnAcc = newJn;
+
+          if (actualJn !== 0) {
+            const ix = nx * actualJn, iy = ny * actualJn, iz = nz * actualJn;
+            if (invMA > 0) {
+              bodyA.vel.x += ix * invMA; bodyA.vel.y += iy * invMA; bodyA.vel.z += iz * invMA;
+              bodyA.angVel.x += (cp.rAy * iz - cp.rAz * iy) * invIA;
+              bodyA.angVel.y += (cp.rAz * ix - cp.rAx * iz) * invIA;
+              bodyA.angVel.z += (cp.rAx * iy - cp.rAy * ix) * invIA;
             }
-            if (bodyB.invMass > 0) {
-              bodyB.vel.addScaledVector(impulseT, -bodyB.invMass);
-              bodyB.angVel.addScaledVector(new THREE.Vector3().crossVectors(rB, impulseT.clone().negate()), bodyB.invInertia * rotScale);
+            if (invMB > 0) {
+              bodyB.vel.x -= ix * invMB; bodyB.vel.y -= iy * invMB; bodyB.vel.z -= iz * invMB;
+              bodyB.angVel.x -= (cp.rBy * iz - cp.rBz * iy) * invIB;
+              bodyB.angVel.y -= (cp.rBz * ix - cp.rBx * iz) * invIB;
+              bodyB.angVel.z -= (cp.rBx * iy - cp.rBy * ix) * invIB;
+            }
+          }
+
+          if (cp.jnAcc > 0) {
+            const rvX =
+              bodyA.vel.x + (bodyA.angVel.y * cp.rAz - bodyA.angVel.z * cp.rAy) -
+              (bodyB.vel.x + (bodyB.angVel.y * cp.rBz - bodyB.angVel.z * cp.rBy));
+            const rvY =
+              bodyA.vel.y + (bodyA.angVel.z * cp.rAx - bodyA.angVel.x * cp.rAz) -
+              (bodyB.vel.y + (bodyB.angVel.z * cp.rBx - bodyB.angVel.x * cp.rBz));
+            const rvZ =
+              bodyA.vel.z + (bodyA.angVel.x * cp.rAy - bodyA.angVel.y * cp.rAx) -
+              (bodyB.vel.z + (bodyB.angVel.x * cp.rBy - bodyB.angVel.y * cp.rBx));
+
+            const vt1 = rvX * t1x + rvY * t1y + rvZ * t1z;
+            const vt2 = rvX * t2x + rvY * t2y + rvZ * t2z;
+            let newJt1 = cp.jt1Acc - vt1 / cp.kT1;
+            let newJt2 = cp.jt2Acc - vt2 / cp.kT2;
+            const maxJt = cp.jnAcc * 0.95;
+            const magSq = newJt1 * newJt1 + newJt2 * newJt2;
+            if (magSq > maxJt * maxJt && magSq > 1e-18) {
+              const s = maxJt / Math.sqrt(magSq);
+              newJt1 *= s;
+              newJt2 *= s;
+            }
+            const dJt1 = newJt1 - cp.jt1Acc;
+            const dJt2 = newJt2 - cp.jt2Acc;
+            cp.jt1Acc = newJt1;
+            cp.jt2Acc = newJt2;
+
+            if (dJt1 !== 0 || dJt2 !== 0) {
+              const ix = t1x * dJt1 + t2x * dJt2;
+              const iy = t1y * dJt1 + t2y * dJt2;
+              const iz = t1z * dJt1 + t2z * dJt2;
+              if (invMA > 0) {
+                bodyA.vel.x += ix * invMA; bodyA.vel.y += iy * invMA; bodyA.vel.z += iz * invMA;
+                bodyA.angVel.x += (cp.rAy * iz - cp.rAz * iy) * invIA;
+                bodyA.angVel.y += (cp.rAz * ix - cp.rAx * iz) * invIA;
+                bodyA.angVel.z += (cp.rAx * iy - cp.rAy * ix) * invIA;
+              }
+              if (invMB > 0) {
+                bodyB.vel.x -= ix * invMB; bodyB.vel.y -= iy * invMB; bodyB.vel.z -= iz * invMB;
+                bodyB.angVel.x -= (cp.rBy * iz - cp.rBz * iy) * invIB;
+                bodyB.angVel.y -= (cp.rBz * ix - cp.rBx * iz) * invIB;
+                bodyB.angVel.z -= (cp.rBx * iy - cp.rBy * ix) * invIB;
+              }
             }
           }
         }
       }
     }
+    solveGroundPass();
 
-    // 5. Симметричный Якоби-солвер контакта с землёй (убирает перекос углов, дребезжание и качели)
+    // 8. Проверка площади опоры снизу вверх (земля -> нижняя доска -> верхняя доска) для полного покоя без левитации
+    const stableGrounded = new Set(["GROUND"]);
+    let changed = true;
+    let guard = 0;
+    while (changed && guard++ < 8) {
+      changed = false;
+      for (const body of bodies.values()) {
+        if (body.isGrabbed || body.isFarInactive || stableGrounded.has(body.gid)) continue;
+        const cands = supportCandidates.get(body.gid);
+        if (!cands || cands.length < 3) continue;
+        const validPts = [];
+        for (const c of cands) {
+          if (stableGrounded.has(c.fromGid)) validPts.push(c);
+        }
+        if (validPts.length >= 3 && isComInsideSupportHullXZ(body.com.x, body.com.z, validPts, 0.035)) {
+          stableGrounded.add(body.gid);
+          changed = true;
+        }
+      }
+    }
+
     for (const body of bodies.values()) {
       if (body.isGrabbed || body.isFarInactive) continue;
-
-      // 5a. Симметричное позиционное выравнивание по всем точкам одновременно (Jacobi)
-      for (let posIter = 0; posIter < 4; posIter++) {
-        const linCorr = new THREE.Vector3();
-        const angCorr = new THREE.Vector3();
-        let penCount = 0;
-
-        for (const pl of body.members) {
-          const pts = getPlankGroundPoints(pl);
-          for (const pt of pts) {
-            const gY = getTerrainHeight(pt.x, pt.z);
-            const pen = gY - pt.y;
-            if (pen > 0.0003) {
-              penCount++;
-              const gx = getTerrainHeight(pt.x + 0.25, pt.z) - gY;
-              const gz = getTerrainHeight(pt.x, pt.z + 0.25) - gY;
-              const n = new THREE.Vector3(-gx * 4, 1, -gz * 4).normalize();
-              const r = pt.clone().sub(body.com);
-              const rXn = new THREE.Vector3().crossVectors(r, n);
-              const k = body.invMass + rXn.lengthSq() * body.invInertia;
-              const dp = ((pen - 0.0003) * 0.7) / k;
-              linCorr.addScaledVector(n, dp * body.invMass);
-              angCorr.addScaledVector(rXn, dp * body.invInertia);
-            }
-          }
-        }
-        if (penCount === 0) break;
-        translateBody(body, linCorr.multiplyScalar(1 / penCount));
-        applyBodyRotationDelta(body, angCorr.multiplyScalar(1 / penCount));
-      }
-
-      // Чистый подъём оставшегося микро-проникновения строго вверх без вращения
-      let maxRemPen = 0;
-      for (const pl of body.members) {
-        const pts = getPlankGroundPoints(pl);
-        for (const pt of pts) {
-          const pen = getTerrainHeight(pt.x, pt.z) - pt.y;
-          if (pen > maxRemPen) maxRemPen = pen;
-        }
-      }
-      if (maxRemPen > 0) {
-        translateBody(body, new THREE.Vector3(0, maxRemPen, 0));
-      }
-
-      // 5b. Симметричное решение скоростей (Jacobi Simultaneous Impulses) — одинаковые углы получают строго равный импульс
-      const contacts = [];
-      let minCX = Infinity, maxCX = -Infinity, minCZ = Infinity, maxCZ = -Infinity;
-      for (const pl of body.members) {
-        const pts = getPlankGroundPoints(pl);
-        for (const pt of pts) {
-          const gY = getTerrainHeight(pt.x, pt.z);
-          if (pt.y <= gY + 0.01) {
-            if (pt.x < minCX) minCX = pt.x;
-            if (pt.x > maxCX) maxCX = pt.x;
-            if (pt.z < minCZ) minCZ = pt.z;
-            if (pt.z > maxCZ) maxCZ = pt.z;
-            const gx = getTerrainHeight(pt.x + 0.25, pt.z) - gY;
-            const gz = getTerrainHeight(pt.x, pt.z + 0.25) - gY;
-            const n = new THREE.Vector3(-gx * 4, 1, -gz * 4).normalize();
-            const r = pt.clone().sub(body.com);
-            const rXn = new THREE.Vector3().crossVectors(r, n);
-            const k = body.invMass + rXn.lengthSq() * body.invInertia;
-            contacts.push({ pt, n, r, k, jnAcc: 0 });
-          }
-        }
-      }
-
-      if (contacts.length > 0) {
-        const weight = 1 / Math.max(1, Math.min(4, contacts.length * 0.5));
-        for (let velIter = 0; velIter < 8; velIter++) {
-          const dVel = new THREE.Vector3();
-          const dAng = new THREE.Vector3();
-          for (const c of contacts) {
-            const velAtPt = body.vel.clone().add(new THREE.Vector3().crossVectors(body.angVel, c.r));
-            const vn = velAtPt.dot(c.n);
-            const dj = (-vn / c.k) * weight;
-            const newJn = Math.max(0, c.jnAcc + dj);
-            const actualJn = newJn - c.jnAcc;
-            c.jnAcc = newJn;
-
-            if (Math.abs(actualJn) > 1e-8) {
-              const impN = c.n.clone().multiplyScalar(actualJn);
-              dVel.addScaledVector(impN, body.invMass);
-              dAng.addScaledVector(new THREE.Vector3().crossVectors(c.r, impN), body.invInertia);
-            }
-          }
-          body.vel.add(dVel);
-          body.angVel.add(dAng);
-        }
-
-        // Симметричное сухое трение о траву/землю
-        const dVelT = new THREE.Vector3();
-        const dAngT = new THREE.Vector3();
-        for (const c of contacts) {
-          if (c.jnAcc <= 0) continue;
-          const velAfter = body.vel.clone().add(new THREE.Vector3().crossVectors(body.angVel, c.r));
-          const tang = velAfter.clone().addScaledVector(c.n, -velAfter.dot(c.n));
-          const tLen = tang.length();
-          if (tLen > 1e-6) {
-            tang.multiplyScalar(1 / tLen);
-            const rXt = new THREE.Vector3().crossVectors(c.r, tang);
-            const kt = body.invMass + rXt.lengthSq() * body.invInertia;
-            const maxJt = c.jnAcc * 0.78;
-            const jt = Math.max(-maxJt, Math.min(maxJt, (-velAfter.dot(tang) / kt) * weight));
-            const impT = tang.multiplyScalar(jt);
-            dVelT.addScaledVector(impT, body.invMass);
-            dAngT.addScaledVector(new THREE.Vector3().crossVectors(c.r, impT), body.invInertia);
-          }
-        }
-        body.vel.add(dVelT);
-        body.angVel.add(dAngT);
-
-        // Проверяем, что центр масс тела действительно лежит внутри площади опоры на земле
-        const comSupported =
-          contacts.length >= 3 &&
-          body.com.x >= minCX - 0.04 &&
-          body.com.x <= maxCX + 0.04 &&
-          body.com.z >= minCZ - 0.04 &&
-          body.com.z <= maxCZ + 0.04;
-
-        const supportDamp = comSupported ? 0.65 : 0.92;
-        body.vel.multiplyScalar(supportDamp);
-        body.angVel.multiplyScalar(supportDamp);
-        if (comSupported && body.vel.lengthSq() < 0.025 && body.angVel.lengthSq() < 0.04) {
-          body.vel.set(0, 0, 0);
-          body.angVel.set(0, 0, 0);
-        }
+      const cands = supportCandidates.get(body.gid);
+      if (!cands || cands.length === 0) continue;
+      const comSupported = stableGrounded.has(body.gid);
+      const supportDamp = comSupported ? 0.62 : 0.92;
+      body.vel.multiplyScalar(supportDamp);
+      body.angVel.multiplyScalar(supportDamp);
+      if (comSupported && body.vel.lengthSq() < 0.025 && body.angVel.lengthSq() < 0.04) {
+        body.vel.set(0, 0, 0);
+        body.angVel.set(0, 0, 0);
       }
     }
   }
 
-  // 6. Записываем обновлённые скорости и координаты в доски один раз после всех подшагов
+  // 9. Записываем обновлённые скорости и координаты в доски один раз после всех подшагов
   for (const body of bodies.values()) {
     if (body.isGrabbed || body.isFarInactive) continue;
     for (const pl of body.members) {
@@ -3339,7 +3873,6 @@ function stepPlanksPhysics(dt) {
     }
   }
 
-  // Обновляем 3D-меши всех досок
   for (const pl of plankList) {
     const m = plankMeshes.get(pl.id);
     if (m) {
@@ -3499,6 +4032,10 @@ window.addEventListener("mousemove", (e) => {
   if (modalBackdrop.style.display === "flex") return;
 
   if (document.pointerLockElement === canvas && state.started) {
+    if (isGrabMouseRotateMode()) {
+      applyGrabMouseRotation(e.movementX, e.movementY, 0.0065);
+      return;
+    }
     state.camYaw -= e.movementX * 0.0026;
     state.camPitch = Math.max(-1.25, Math.min(1.25, state.camPitch + e.movementY * 0.0024));
     state.ry = state.camYaw;
@@ -3510,6 +4047,10 @@ window.addEventListener("mousemove", (e) => {
   if (Math.abs(dx) > 3 || Math.abs(dy) > 3) dragMoved = true;
   lastMouseX = e.clientX;
   lastMouseY = e.clientY;
+  if (isGrabMouseRotateMode()) {
+    applyGrabMouseRotation(dx, dy, 0.0085);
+    return;
+  }
   state.camYaw -= dx * 0.006;
   state.camPitch = Math.max(-1.2, Math.min(1.2, state.camPitch + dy * 0.005));
   state.ry = state.camYaw;
@@ -3864,14 +4405,14 @@ bindHoldButton(
   "btn-mob-rotate",
   () => {
     if (grabState.active) {
-      keys["KeyR"] = true;
+      mobGrabSpin.y = true;
     } else {
       state.plankSpawnYaw = (state.plankSpawnYaw + Math.PI / 4) % (Math.PI * 2);
       showToast("🔄 Доска повёрнута на 45°");
     }
   },
   () => {
-    keys["KeyR"] = false;
+    mobGrabSpin.y = false;
   }
 );
 
@@ -3888,9 +4429,9 @@ bindHoldButton("btn-mob-stash", () => {
 });
 
 // Кнопки панели 3D-вращения и дистанции схваченной доски
-bindHoldButton("btn-grab-rot-y", () => { keys["KeyR"] = true; }, () => { keys["KeyR"] = false; });
-bindHoldButton("btn-grab-rot-x", () => { keys["KeyE"] = true; }, () => { keys["KeyE"] = false; });
-bindHoldButton("btn-grab-rot-z", () => { keys["KeyQ"] = true; }, () => { keys["KeyQ"] = false; });
+bindHoldButton("btn-grab-rot-y", () => { mobGrabSpin.y = true; }, () => { mobGrabSpin.y = false; });
+bindHoldButton("btn-grab-rot-x", () => { mobGrabSpin.x = true; }, () => { mobGrabSpin.x = false; });
+bindHoldButton("btn-grab-rot-z", () => { mobGrabSpin.z = true; }, () => { mobGrabSpin.z = false; });
 bindHoldButton("btn-grab-near", () => {
   if (grabState.active) grabState.distance = Math.max(1.5, grabState.distance - 0.4);
 });
@@ -4361,7 +4902,7 @@ function animate(now) {
 
   let isMoving = false;
   if (state.started) {
-    if (keys["KeyQ"] && !grabState.active) state.camYaw += 1.8 * dt;
+    if (keys["KeyQ"] && !grabState.active && state.heldItem !== "hand") state.camYaw += 1.8 * dt;
 
     let fwd = 0;
     let right = 0;
