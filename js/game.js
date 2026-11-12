@@ -1,14 +1,11 @@
-import * as THREE from "three";
-import { Peer } from "peerjs";
-import mqtt from "mqtt";
-import { generateSecretKey, finalizeEvent } from "nostr-tools/pure";
+import * as THREE from "./vendor/three.js?v=24";
 import {
   CHUNK_SIZE,
   getTerrainHeight,
   getChunkLayout,
   hasEastWestHighway,
   hasNorthSouthHighway
-} from "./world.js?v=23";
+} from "./world.js?v=24";
 import {
   ITEMS,
   CROPS,
@@ -17,7 +14,7 @@ import {
   SHOP_GOODS,
   BAZAAR_PRICES,
   playSfx
-} from "./data.js?v=23";
+} from "./data.js?v=24";
 import {
   createTerrainChunkMesh,
   createChunkResourcesBatch,
@@ -34,24 +31,64 @@ import {
   rebuildPlankNailsMesh,
   createSingleNailMesh,
   animatePlayerMesh
-} from "./models.js?v=23";
+} from "./models.js?v=24";
 
-// Полная очистка всей истории прошлой игры (старых участков, досок, построек и профилей)
-const GAME_RESET_EPOCH = "dacha3_taiga_clean_epoch_v1";
-const PROFILE_STORAGE_KEY = "project_dacha3_profile_taiga_v1";
+// Безопасная обёртка над localStorage для Firefox (при строгой защите от отслеживания / запрете куки не выбрасывает SecurityError)
+const memoryStorageFallback = new Map();
+function safeStorageGet(key) {
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return memoryStorageFallback.has(key) ? memoryStorageFallback.get(key) : null;
+  }
+}
+function safeStorageSet(key, val) {
+  const str = String(val);
+  memoryStorageFallback.set(key, str);
+  try {
+    window.localStorage.setItem(key, str);
+  } catch {}
+}
+function safeStorageRemove(key) {
+  memoryStorageFallback.delete(key);
+  try {
+    window.localStorage.removeItem(key);
+  } catch {}
+}
+
+// Полная очистка всей истории прошлой игры (чата, досок, участков, срубленных ресурсов и профилей)
+const GAME_RESET_EPOCH = "dacha3_clean_epoch_v24_20261112";
+const PROFILE_STORAGE_KEY = "project_dacha3_profile_v24";
+
 try {
-  if (localStorage.getItem("project_dacha3_reset_epoch") !== GAME_RESET_EPOCH) {
-    const legacyKeys = [];
-    for (let i = 0; i < localStorage.length; i++) {
-      const k = localStorage.key(i);
-      if (k && k.startsWith("project_dacha")) legacyKeys.push(k);
-    }
-    for (const k of legacyKeys) localStorage.removeItem(k);
-    localStorage.setItem("project_dacha3_reset_epoch", GAME_RESET_EPOCH);
+  if (safeStorageGet("project_dacha3_reset_epoch") !== GAME_RESET_EPOCH) {
+    try {
+      const legacyKeys = [];
+      for (let i = 0; i < window.localStorage.length; i++) {
+        const k = window.localStorage.key(i);
+        if (k && k.startsWith("project_dacha")) legacyKeys.push(k);
+      }
+      for (const k of legacyKeys) window.localStorage.removeItem(k);
+    } catch {}
+    try {
+      const sessionKeys = [];
+      for (let i = 0; i < window.sessionStorage.length; i++) {
+        const k = window.sessionStorage.key(i);
+        if (k && k.startsWith("project_dacha")) sessionKeys.push(k);
+      }
+      for (const k of sessionKeys) window.sessionStorage.removeItem(k);
+    } catch {}
+    safeStorageSet("project_dacha3_reset_epoch", GAME_RESET_EPOCH);
   }
 } catch {}
 
-const savedProfile = JSON.parse(localStorage.getItem(PROFILE_STORAGE_KEY) || "null");
+let savedProfile = null;
+try {
+  const rawProf = safeStorageGet(PROFILE_STORAGE_KEY);
+  savedProfile = rawProf ? JSON.parse(rawProf) : null;
+} catch {
+  savedProfile = null;
+}
 
 const state = {
   started: false,
@@ -108,11 +145,11 @@ const state = {
   remotePlayers: new Map()
 };
 
-const WORLD_PLANKS_STORAGE_KEY = "project_dacha3_planks_taiga_v1";
+const WORLD_PLANKS_STORAGE_KEY = "project_dacha3_planks_v24";
 
 function loadSavedWorldPlanks() {
   try {
-    const raw = localStorage.getItem(WORLD_PLANKS_STORAGE_KEY);
+    const raw = safeStorageGet(WORLD_PLANKS_STORAGE_KEY);
     return raw ? JSON.parse(raw) : {};
   } catch {
     return {};
@@ -121,7 +158,7 @@ function loadSavedWorldPlanks() {
 
 function saveWorldPlanks() {
   try {
-    localStorage.setItem(WORLD_PLANKS_STORAGE_KEY, JSON.stringify(state.planks || {}));
+    safeStorageSet(WORLD_PLANKS_STORAGE_KEY, JSON.stringify(state.planks || {}));
   } catch {}
 }
 
@@ -142,7 +179,7 @@ state.tools.saw = true;
 
 function saveLocalProfile() {
   try {
-    localStorage.setItem(
+    safeStorageSet(
       PROFILE_STORAGE_KEY,
       JSON.stringify({
         playerKey: state.playerKey,
@@ -165,14 +202,44 @@ function saveLocalProfile() {
 }
 
 // ==========================================
-// THREE.JS СЦЕНА И ЧАНКИ МИРА
+// THREE.JS СЦЕНА И ЧАНКИ МИРА (С ПОЛНОЙ ПОДДЕРЖКОЙ FIREFOX WEBGL)
 // ==========================================
-const canvas = document.getElementById("game-canvas");
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+let canvas = document.getElementById("game-canvas");
+
+function createResilientRenderer() {
+  const attempts = [
+    { antialias: true, powerPreference: "high-performance" },
+    { antialias: false, powerPreference: "default" },
+    { antialias: false, precision: "mediump", failIfMajorPerformanceCaveat: false }
+  ];
+  for (let i = 0; i < attempts.length; i++) {
+    try {
+      if (i > 0) {
+        const fresh = canvas.cloneNode(false);
+        canvas.parentNode.replaceChild(fresh, canvas);
+        canvas = fresh;
+      }
+      const r = new THREE.WebGLRenderer({ canvas, ...attempts[i] });
+      r.setSize(window.innerWidth, window.innerHeight);
+      r.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      r.shadowMap.enabled = true;
+      r.shadowMap.type = THREE.PCFSoftShadowMap;
+      return r;
+    } catch {}
+  }
+  const sub = document.querySelector(".login-sub");
+  if (sub) {
+    sub.innerHTML += "<br><b style='color:#ff8a80'>⚠️ В браузере отключён WebGL. Включите аппаратное ускорение в настройках браузера (Firefox: about:config → webgl.disabled = false).</b>";
+  }
+  return {
+    setSize() {},
+    setPixelRatio() {},
+    render() {},
+    shadowMap: { enabled: false, type: 0 }
+  };
+}
+
+const renderer = createResilientRenderer();
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x87ceeb);
@@ -249,9 +316,13 @@ let manualTouchModeOverride = null;
 function detectMobileOrTouchDevice() {
   if (manualTouchModeOverride !== null) return manualTouchModeOverride;
   const hasCoarse = typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches;
-  const hasTouch = ("ontouchstart" in window) || (navigator.maxTouchPoints > 0);
-  const smallScreen = window.innerWidth <= 960 || window.innerHeight <= 540;
-  return Boolean(hasCoarse || hasTouch || smallScreen);
+  const hasFine = typeof window.matchMedia === "function" && window.matchMedia("(pointer: fine)").matches;
+  const isMobileUA = /Android|iPhone|iPad|iPod|Mobile|Tablet/i.test(navigator.userAgent || "");
+  const smallScreen = window.innerWidth <= 820 || window.innerHeight <= 500;
+  if (isMobileUA || hasCoarse) return true;
+  if (hasFine && !smallScreen) return false;
+  const hasTouch = ("ontouchstart" in window) || ((navigator.maxTouchPoints || 0) > 0);
+  return Boolean((hasTouch && smallScreen) || smallScreen);
 }
 
 function isTouchModeActive() {
@@ -428,35 +499,48 @@ function refreshAllPlotSigns() {
 }
 
 // ==========================================
-// МУЛЬТИПЛЕЕРНАЯ СИНХРОНИЗАЦИЯ (ЕДИНЫЙ ЦЕНТРАЛЬНЫЙ СЕРВЕР СНТ #1)
+// МУЛЬТИПЛЕЕРНАЯ СИНХРОНИЗАЦИЯ (ЧИСТЫЙ СЕРВЕР v24 + НАДЁЖНАЯ ВИДИМОСТЬ ИГРОКОВ)
 // ==========================================
-const CENTRAL_ROOM_TOPIC = "project_dacha3_taiga_clean_server_v1";
+const CENTRAL_ROOM_TOPIC = "project_dacha3_clean_epoch_v24_20261112";
 const NTFY_HTTP_URL = `https://ntfy.sh/${CENTRAL_ROOM_TOPIC}`;
-const NTFY_WS_URL = `wss://ntfy.sh/${CENTRAL_ROOM_TOPIC}/ws?since=2h`;
-const NTFY_SSE_URL = `https://ntfy.sh/${CENTRAL_ROOM_TOPIC}/sse?since=2h`;
+const NTFY_POLL_URL = `https://ntfy.sh/${CENTRAL_ROOM_TOPIC}/json?poll=1&since=12h`;
+const NTFY_WS_URL = `wss://ntfy.sh/${CENTRAL_ROOM_TOPIC}/ws`;
+const NTFY_SSE_URL = `https://ntfy.sh/${CENTRAL_ROOM_TOPIC}/sse`;
 
 const seenPackets = new Set();
-const bcChannel = typeof BroadcastChannel !== "undefined" ? new BroadcastChannel("project_dacha3_taiga_bc_v1") : null;
+const seenChatIds = new Set();
+let bcChannel = null;
+try {
+  if (typeof BroadcastChannel !== "undefined") {
+    bcChannel = new BroadcastChannel("project_dacha3_bc_v24_20261112");
+  }
+} catch {}
 
 let ntfyConnected = false;
 const mqttClients = [];
 const nostrSockets = [];
-const sessionSk = generateSecretKey();
+let nostrFinalizeEvent = null;
+let sessionSk = null;
 let peerInstance = null;
 let myPeerId = "";
 const peerConnections = new Map();
+const peerAttemptCooldown = new Map();
 const peerLastPosSentAt = new Map();
 let lastNtfyPosSentAt = 0;
 let lastNostrPosSentAt = 0;
 let pendingWorldSyncTimer = null;
+let pendingPresenceReplyTimer = null;
+let lastPresenceReplySentAt = 0;
+let lastWorldSyncReplyAt = 0;
 const MAX_DIRECT_PEERS = 28;
+const utf8Decoder = typeof TextDecoder !== "undefined" ? new TextDecoder() : null;
 
 // Авто-выбор хоста синхронизации (лидера комнаты) среди онлайн-игроков
 function isLocalPlayerSyncLeader() {
   let minKey = state.playerKey;
   const now = Date.now();
   for (const [pid, rp] of state.remotePlayers.entries()) {
-    if (now - rp.lastSeen < 6000 && pid < minKey) {
+    if (now - rp.lastSeen < 18000 && pid < minKey) {
       minKey = pid;
     }
   }
@@ -478,7 +562,7 @@ function cleanupDepartedPlayers() {
   const now = Date.now();
   let removedAny = false;
   for (const [pid, rp] of state.remotePlayers.entries()) {
-    if (now - rp.lastSeen > 6500) {
+    if (now - rp.lastSeen > 20000) {
       if (rp.mesh) scene.remove(rp.mesh);
       state.remotePlayers.delete(pid);
       removedAny = true;
@@ -495,7 +579,7 @@ function updateNetBadge() {
   if (!el) return;
   const peersCount = peerConnections.size;
   const mqttOk = mqttClients.some((c) => c.connected);
-  const nostrOk = nostrSockets.some((w) => w.readyState === WebSocket.OPEN);
+  const nostrOk = nostrSockets.some((entry) => entry.ws.readyState === WebSocket.OPEN);
   if (ntfyConnected || mqttOk || nostrOk || peersCount > 0) {
     el.textContent = `🟢 Единый Сервер СНТ #1 (Игроков: ${state.remotePlayers.size + 1})`;
   } else {
@@ -504,11 +588,16 @@ function updateNetBadge() {
 }
 
 function connectToPeer(remotePeerId) {
-  if (!peerInstance || !remotePeerId || remotePeerId === myPeerId || peerConnections.has(remotePeerId)) return;
+  if (!peerInstance || !peerInstance.open || !remotePeerId || remotePeerId === myPeerId) return;
+  if (peerConnections.has(remotePeerId)) return;
+  const now = Date.now();
+  const lastTry = peerAttemptCooldown.get(remotePeerId) || 0;
+  if (now - lastTry < 15000) return;
   const maxPeers = isLocalPlayerSyncLeader() ? 64 : MAX_DIRECT_PEERS;
   if (peerConnections.size >= maxPeers) return;
+  peerAttemptCooldown.set(remotePeerId, now);
   try {
-    const conn = peerInstance.connect(remotePeerId, { reliable: false });
+    const conn = peerInstance.connect(remotePeerId, { serialization: "json" });
     setupPeerConnection(conn);
   } catch {}
 }
@@ -517,34 +606,43 @@ function setupPeerConnection(conn) {
   if (!conn || !conn.peer) return;
   conn.on("open", () => {
     peerConnections.set(conn.peer, conn);
+    peerAttemptCooldown.set(conn.peer, Date.now());
     updateNetBadge();
     if (state.started) {
-      conn.send(buildPresencePacket("player_joined"));
-      // Отправляем слепок мира точечно новому пиру (unicast), не засоряя общий эфир
+      try {
+        conn.send(buildPresencePacket("player_joined"));
+      } catch {}
       if (Object.keys(state.plots).length > 0 || Object.keys(state.planks).length > 0) {
-        conn.send({
-          type: "world_sync_snapshot",
-          pktId: `${state.playerKey}_snap_${Date.now()}`,
-          senderKey: state.playerKey,
-          plots: state.plots,
-          planks: state.planks,
-          harvested: state.harvested
-        });
+        try {
+          conn.send({
+            epoch: GAME_RESET_EPOCH,
+            type: "world_sync_snapshot",
+            pktId: `${state.playerKey}_snap_${Date.now()}`,
+            senderKey: state.playerKey,
+            peerId: myPeerId,
+            sentAt: Date.now(),
+            senderMeta: buildSenderMeta(),
+            plots: state.plots,
+            planks: state.planks,
+            harvested: state.harvested
+          });
+        } catch {}
       }
     }
   });
   conn.on("data", (data) => {
     if (typeof data === "string") {
-      try { handleIncomingPacket(JSON.parse(data)); } catch {}
+      try { handleIncomingPacket(JSON.parse(data), false); } catch {}
     } else if (data && typeof data === "object") {
-      handleIncomingPacket(data);
+      handleIncomingPacket(data, false);
     }
   });
   conn.on("close", () => {
     peerConnections.delete(conn.peer);
     peerLastPosSentAt.delete(conn.peer);
-    for (const [pid, rp] of state.remotePlayers.entries()) {
-      if (rp.peerId === conn.peer) removeRemotePlayer(pid);
+    // Не удаляем игрока при сбое прямого WebRTC (NAT/CGNAT), т.к. связь продолжается через MQTT/Nostr/ntfy!
+    for (const rp of state.remotePlayers.values()) {
+      if (rp.peerId === conn.peer) rp.peerId = "";
     }
     updateNetBadge();
   });
@@ -554,65 +652,118 @@ function setupPeerConnection(conn) {
   });
 }
 
-function buildPresencePacket(type = "player_moved") {
+function buildSenderMeta(animOverride = "") {
+  if (!state.started || !state.name) return null;
   const myPlotsCount = Object.values(state.plots).filter((p) => p.ownerKey === state.playerKey).length;
   return {
-    type,
-    pktId: `${state.playerKey}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-    senderKey: state.playerKey,
-    peerId: myPeerId,
     name: state.name,
     color: state.color,
     x: Number(state.x.toFixed(2)),
     y: Number(state.y.toFixed(2)),
     z: Number(state.z.toFixed(2)),
     ry: Number(state.ry.toFixed(2)),
-    anim: state.workTimer > 0 ? "work" : "walk",
+    anim: animOverride || (state.workTimer > 0 ? "work" : "idle"),
+    heldItem: state.heldItem || "axe",
+    hasSteelAxe: Boolean(state.tools.axe),
     money: Math.round(state.money),
     plotsCount: myPlotsCount
   };
 }
 
-let currentSectorKey = "";
+function buildPresencePacket(type = "player_moved", animOverride = "") {
+  const myPlotsCount = Object.values(state.plots).filter((p) => p.ownerKey === state.playerKey).length;
+  return {
+    epoch: GAME_RESET_EPOCH,
+    type,
+    pktId: `${state.playerKey}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    senderKey: state.playerKey,
+    peerId: myPeerId,
+    sentAt: Date.now(),
+    name: state.name,
+    color: state.color,
+    x: Number(state.x.toFixed(2)),
+    y: Number(state.y.toFixed(2)),
+    z: Number(state.z.toFixed(2)),
+    ry: Number(state.ry.toFixed(2)),
+    anim: animOverride || (state.workTimer > 0 ? "work" : "idle"),
+    heldItem: state.heldItem || "axe",
+    hasSteelAxe: Boolean(state.tools.axe),
+    money: Math.round(state.money),
+    plotsCount: myPlotsCount
+  };
+}
+
+let currentSectorCenter = "";
 let lastGlobalPresenceSentAt = 0;
 
-function getPlayerSectorTopic() {
+function getPlayerSectorCoords() {
   const cx = Math.round(state.x / CHUNK_SIZE);
   const cz = Math.round(state.z / CHUNK_SIZE);
+  return { cx, cz };
+}
+
+function getPlayerSectorTopic() {
+  const { cx, cz } = getPlayerSectorCoords();
   return `${CENTRAL_ROOM_TOPIC}/sec_${cx}_${cz}`;
 }
 
-function updateSectorSubscriptions() {
-  const nextSec = getPlayerSectorTopic();
-  if (nextSec === currentSectorKey) return;
-  currentSectorKey = nextSec;
-  for (const mc of mqttClients) {
-    if (mc.connected) {
-      try {
-        if (mc._subscribedSector && mc._subscribedSector !== nextSec) {
-          mc.unsubscribe(mc._subscribedSector);
-        }
-        mc.subscribe(nextSec);
-        mc._subscribedSector = nextSec;
-      } catch {}
+function getNeighborSectorTopics() {
+  const { cx, cz } = getPlayerSectorCoords();
+  const topics = [];
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dz = -1; dz <= 1; dz++) {
+      topics.push(`${CENTRAL_ROOM_TOPIC}/sec_${cx + dx}_${cz + dz}`);
     }
+  }
+  return topics;
+}
+
+function updateSectorSubscriptions(force = false) {
+  const { cx, cz } = getPlayerSectorCoords();
+  const centerKey = `${cx},${cz}`;
+  if (!force && centerKey === currentSectorCenter) return;
+  currentSectorCenter = centerKey;
+  const nextSet = new Set(getNeighborSectorTopics());
+
+  for (const mc of mqttClients) {
+    if (!mc.connected) continue;
+    try {
+      const prevSet = mc._subscribedSectors || new Set();
+      for (const oldT of prevSet) {
+        if (!nextSet.has(oldT)) mc.unsubscribe(oldT);
+      }
+      for (const newT of nextSet) {
+        if (!prevSet.has(newT)) mc.subscribe(newT);
+      }
+      mc._subscribedSectors = new Set(nextSet);
+    } catch {}
   }
 }
 
 function broadcastNetworkPacket(payload, isWorldState = false) {
   const pktId = payload.pktId || `${state.playerKey}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-  const fullPkt = { ...payload, pktId, senderKey: state.playerKey, peerId: myPeerId, sentAt: Date.now() };
+  const meta = payload.type !== "player_left" ? (payload.senderMeta || buildSenderMeta(payload.anim || "")) : null;
+  const fullPkt = {
+    ...payload,
+    epoch: GAME_RESET_EPOCH,
+    pktId,
+    senderKey: state.playerKey,
+    peerId: myPeerId,
+    sentAt: Date.now(),
+    ...(meta ? { senderMeta: meta } : {})
+  };
   seenPackets.add(pktId);
   const rawJson = JSON.stringify(fullPkt);
   const now = Date.now();
   const isMovePkt = fullPkt.type === "player_moved";
 
-  // 1. Локальные вкладки браузера
+  // 1. Локальные вкладки одного браузера (Firefox / Chrome)
   if (bcChannel) {
     try { bcChannel.postMessage(fullPkt); } catch {}
   }
 
-  // 2. Прямые WebRTC-соединения PeerJS с приоритизацией по дистанции (Interest Management для 50+ игроков)
+  // 2. Прямые WebRTC-соединения PeerJS
+  let openPeersSent = 0;
   for (const [peerId, conn] of peerConnections.entries()) {
     if (!conn.open) continue;
     if (isMovePkt) {
@@ -625,37 +776,42 @@ function broadcastNetworkPacket(payload, isWorldState = false) {
           break;
         }
       }
-      // Игрокам рядом (< 130м) шлём каждый тик, далёким — раз в 750 мс для экономии канала
-      if (distSq > 130 * 130) {
+      if (distSq > 160 * 160) {
         const lastSent = peerLastPosSentAt.get(peerId) || 0;
-        if (now - lastSent < 750) continue;
+        if (now - lastSent < 650) continue;
       }
       peerLastPosSentAt.set(peerId, now);
     }
-    try { conn.send(fullPkt); } catch {}
+    try {
+      conn.send(fullPkt);
+      openPeersSent++;
+    } catch {}
   }
 
-  // 3. Брокеры MQTT с шардингом по секторам СНТ: частые шаги идут только соседям по чанку, а раз в 4.5с — в общий эфир
+  // 3. Публичные брокеры MQTT — публикуем во ВСЕ подключённые брокеры, чтобы игроки на разных провайдерах гарантированно видели друг друга!
   updateSectorSubscriptions();
-  const isGlobalHeartbeat = isMovePkt && now - lastGlobalPresenceSentAt > 4500;
+  const isGlobalHeartbeat = isMovePkt && now - lastGlobalPresenceSentAt > 2200;
   if (isGlobalHeartbeat) lastGlobalPresenceSentAt = now;
-  const targetTopic = isMovePkt && !isGlobalHeartbeat ? getPlayerSectorTopic() : `${CENTRAL_ROOM_TOPIC}/live`;
+  const useSectorSharding = isMovePkt && !isGlobalHeartbeat && state.remotePlayers.size >= 30;
+  const targetTopic = useSectorSharding ? getPlayerSectorTopic() : `${CENTRAL_ROOM_TOPIC}/live`;
 
+  let mqttSentCount = 0;
   for (const mc of mqttClients) {
     if (mc.connected) {
       try {
         mc.publish(targetTopic, rawJson, { qos: isWorldState ? 1 : 0, retain: isWorldState });
-        if (isMovePkt) break;
+        mqttSentCount++;
       } catch {}
     }
   }
 
-  // 4. Глобальные Nostr-релеи (для мировых событий сразу, для координат — с антиспам-интервалом)
-  const shouldSendNostr = !isMovePkt || now - lastNostrPosSentAt > 1100;
-  if (shouldSendNostr && nostrSockets.some((w) => w.readyState === WebSocket.OPEN)) {
+  // 4. Глобальные Nostr-релеи — рассылаем во все открытые релеи
+  let nostrSentCount = 0;
+  const shouldSendNostr = !isMovePkt || now - lastNostrPosSentAt > 850;
+  if (shouldSendNostr && nostrFinalizeEvent && sessionSk && nostrSockets.some((s) => s.ws.readyState === WebSocket.OPEN)) {
     if (isMovePkt) lastNostrPosSentAt = now;
     try {
-      const ev = finalizeEvent(
+      const ev = nostrFinalizeEvent(
         {
           kind: 1,
           created_at: Math.floor(now / 1000),
@@ -665,17 +821,20 @@ function broadcastNetworkPacket(payload, isWorldState = false) {
         sessionSk
       );
       const frame = JSON.stringify(["EVENT", ev]);
-      for (const ws of nostrSockets) {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(frame);
-          if (isMovePkt) break;
+      for (const entry of nostrSockets) {
+        if (entry.ws.readyState === WebSocket.OPEN) {
+          entry.ws.send(frame);
+          nostrSentCount++;
         }
       }
     } catch {}
   }
 
-  // 5. Центральный сервер ntfy.sh (хранит историю построек и покупок 12 часов; бережём лимиты при большом онлайне)
-  const ntfyMoveInterval = Math.max(6000, state.remotePlayers.size * 650);
+  // 5. Центральный сервер ntfy.sh (хранит постройки/участки и страхует координаты, если WebRTC/MQTT/Nostr заблокированы провайдером)
+  const hasFastRealtime = openPeersSent > 0 || mqttSentCount > 0 || nostrSentCount > 0;
+  const ntfyMoveInterval = hasFastRealtime
+    ? Math.max(4500, state.remotePlayers.size * 500)
+    : 2800;
   const shouldPostNtfy =
     isWorldState ||
     fullPkt.type === "player_joined" ||
@@ -691,22 +850,41 @@ function broadcastNetworkPacket(payload, isWorldState = false) {
   }
 }
 
+// Каждый онлайн-игрок отвечает своим присутствием при входе новичка (не отменяется ответом лидера!)
+function schedulePresenceReply() {
+  if (!state.started || !state.name) return;
+  if (Date.now() - lastPresenceReplySentAt < 1100) return;
+  if (pendingPresenceReplyTimer) return;
+  const delay = 70 + Math.random() * 220;
+  pendingPresenceReplyTimer = setTimeout(() => {
+    pendingPresenceReplyTimer = null;
+    if (!state.started) return;
+    lastPresenceReplySentAt = Date.now();
+    broadcastNetworkPacket(buildPresencePacket("player_joined"), false);
+  }, delay);
+}
+
 function sendMyPresenceAndWorldSnapshot(targetPeerId = "") {
   if (!state.started) return;
   broadcastNetworkPacket(buildPresencePacket("player_joined"), false);
 
-  if (Object.keys(state.plots).length === 0 && Object.keys(state.planks).length === 0) return;
+  if (Object.keys(state.plots).length === 0 && Object.keys(state.planks).length === 0 && Object.keys(state.harvested).length === 0) {
+    return;
+  }
 
   const snapPkt = {
+    epoch: GAME_RESET_EPOCH,
     type: "world_sync_snapshot",
     pktId: `${state.playerKey}_snap_${Date.now()}`,
     senderKey: state.playerKey,
+    peerId: myPeerId,
+    sentAt: Date.now(),
+    senderMeta: buildSenderMeta(),
     plots: state.plots,
     planks: state.planks,
     harvested: state.harvested
   };
 
-  // Если есть прямое P2P-соединение с запросившим игроком — отдаём слепок мира напрямую ему
   if (targetPeerId && peerConnections.has(targetPeerId)) {
     const conn = peerConnections.get(targetPeerId);
     if (conn && conn.open) {
@@ -721,14 +899,14 @@ function sendMyPresenceAndWorldSnapshot(targetPeerId = "") {
 }
 
 function scheduleLeaderWorldSync(targetPeerId = "") {
-  if (Date.now() - lastWorldSyncReplyAt < 1800) return;
+  if (!state.started) return;
+  if (Date.now() - lastWorldSyncReplyAt < 1500) return;
   if (pendingWorldSyncTimer) clearTimeout(pendingWorldSyncTimer);
-  // Лидер комнаты отвечает через 120 мс, резервный игрок — через 650 мс (только если никто ещё не ответил)
   const isLeader = isLocalPlayerSyncLeader();
-  const delay = isLeader ? 120 + Math.random() * 120 : 650 + Math.random() * 450;
+  const delay = isLeader ? 110 + Math.random() * 120 : 600 + Math.random() * 420;
   pendingWorldSyncTimer = setTimeout(() => {
     pendingWorldSyncTimer = null;
-    if (Date.now() - lastWorldSyncReplyAt < 1500) return;
+    if (Date.now() - lastWorldSyncReplyAt < 1300) return;
     lastWorldSyncReplyAt = Date.now();
     sendMyPresenceAndWorldSnapshot(targetPeerId);
   }, delay);
@@ -774,28 +952,118 @@ function mergeWorldSnapshot(pkt) {
   saveLocalProfile();
 }
 
-let lastWorldSyncReplyAt = 0;
+function upsertRemotePlayer(pid, info, peerIdHint = "") {
+  if (!pid || pid === state.playerKey) return false;
+  const cleanName = String(info.name || "").trim();
+  if (!cleanName && !state.remotePlayers.has(pid)) return false;
 
-function handleIncomingPacket(pkt) {
+  const isNewPlayer = !state.remotePlayers.has(pid);
+  let rp = state.remotePlayers.get(pid);
+  const px = typeof info.x === "number" && Number.isFinite(info.x) ? info.x : 0;
+  const pz = typeof info.z === "number" && Number.isFinite(info.z) ? info.z : 82;
+  const py = typeof info.y === "number" && Number.isFinite(info.y) ? info.y : getTerrainHeight(px, pz);
+  const color = info.color || "#1565c0";
+  const heldItem = info.heldItem || "axe";
+  const hasSteelAxe = Boolean(info.hasSteelAxe);
+
+  if (!rp) {
+    const mesh = createPlayerMesh(cleanName || "Дачник", color);
+    mesh.position.set(px, py, pz);
+    updateThirdPersonHeldItem(mesh, heldItem, hasSteelAxe);
+    scene.add(mesh);
+    rp = {
+      id: pid,
+      peerId: info.peerId || peerIdHint || "",
+      name: cleanName || "Дачник",
+      color,
+      x: px,
+      y: py,
+      z: pz,
+      tx: px,
+      ty: py,
+      tz: pz,
+      ry: typeof info.ry === "number" ? info.ry : 0,
+      anim: info.anim || "idle",
+      heldItem,
+      hasSteelAxe,
+      money: typeof info.money === "number" ? info.money : 500,
+      plotsCount: typeof info.plotsCount === "number" ? info.plotsCount : 0,
+      lastSeen: Date.now(),
+      mesh
+    };
+    state.remotePlayers.set(pid, rp);
+    updateOnlineListUI();
+    updateNetBadge();
+  } else {
+    let listChanged = false;
+    const nextColor = info.color || rp.color;
+    if ((cleanName && cleanName !== rp.name) || nextColor !== rp.color) {
+      if (cleanName) rp.name = cleanName;
+      rp.color = nextColor;
+      scene.remove(rp.mesh);
+      rp.mesh = createPlayerMesh(rp.name, rp.color);
+      rp.mesh.position.set(rp.x, rp.y, rp.z);
+      scene.add(rp.mesh);
+      listChanged = true;
+    }
+    if (typeof info.x === "number" && Number.isFinite(info.x)) rp.tx = info.x;
+    if (typeof info.y === "number" && Number.isFinite(info.y)) rp.ty = info.y;
+    if (typeof info.z === "number" && Number.isFinite(info.z)) rp.tz = info.z;
+    if (typeof info.ry === "number" && Number.isFinite(info.ry)) rp.ry = info.ry;
+    if (info.anim) rp.anim = info.anim;
+    if (info.heldItem) rp.heldItem = info.heldItem;
+    if (typeof info.hasSteelAxe === "boolean") rp.hasSteelAxe = info.hasSteelAxe;
+    updateThirdPersonHeldItem(rp.mesh, rp.heldItem || "axe", Boolean(rp.hasSteelAxe));
+
+    if (typeof info.money === "number" && info.money !== rp.money) {
+      rp.money = info.money;
+      listChanged = true;
+    }
+    if (typeof info.plotsCount === "number" && info.plotsCount !== rp.plotsCount) {
+      rp.plotsCount = info.plotsCount;
+      listChanged = true;
+    }
+    if (info.peerId || peerIdHint) rp.peerId = info.peerId || peerIdHint;
+    rp.lastSeen = Date.now();
+    if (listChanged) updateOnlineListUI();
+  }
+  return isNewPlayer;
+}
+
+function handleIncomingPacket(pkt, isHistorical = false) {
   if (!pkt || !pkt.type) return;
+  // Игнорируем любые пакеты от прошлых эпох игры (гарантия полной чистоты мира и чата)
+  if (pkt.epoch !== GAME_RESET_EPOCH) return;
+
   if (pkt.pktId) {
     if (seenPackets.has(pkt.pktId)) return;
     seenPackets.add(pkt.pktId);
-    if (seenPackets.size > 4000) seenPackets.delete(seenPackets.values().next().value);
+    if (seenPackets.size > 5000) seenPackets.delete(seenPackets.values().next().value);
   }
   if (pkt.senderKey === state.playerKey) return;
 
-  if (pkt.peerId && pkt.peerId !== myPeerId) {
+  if (!isHistorical && pkt.peerId && pkt.peerId !== myPeerId) {
     connectToPeer(pkt.peerId);
+  }
+
+  // Любой живой сетевой пакет (чат, установка/перемещение доски, покупка участка, синхронизация)
+  // автоматически регистрирует и обновляет отправителя в списке игроков и в 3D-мире (без зависимости от часов ПК!)
+  if (!isHistorical && pkt.type !== "player_left" && pkt.senderMeta && pkt.senderKey) {
+    const discoveredNew = upsertRemotePlayer(pkt.senderKey, pkt.senderMeta, pkt.peerId || "");
+    if (discoveredNew) {
+      schedulePresenceReply();
+      scheduleLeaderWorldSync(pkt.peerId || "");
+    }
   }
 
   switch (pkt.type) {
     case "request_world_sync": {
+      if (isHistorical) return;
+      schedulePresenceReply();
       scheduleLeaderWorldSync(pkt.peerId || "");
       break;
     }
     case "world_sync_snapshot": {
-      // Если другой игрок уже разослал слепок мира — отменяем дублирующую отправку
       lastWorldSyncReplyAt = Date.now();
       if (pendingWorldSyncTimer) {
         clearTimeout(pendingWorldSyncTimer);
@@ -805,59 +1073,20 @@ function handleIncomingPacket(pkt) {
       break;
     }
     case "player_left": {
+      if (isHistorical) return;
       const pid = pkt.senderKey || pkt.id;
       if (pid) removeRemotePlayer(pid);
       break;
     }
     case "player_moved":
     case "player_joined": {
-      // Отсекаем старые пакеты движения/входа из истории релеев, чтобы ушедшие игроки никогда не появлялись!
-      if (!pkt.sentAt || Math.abs(Date.now() - pkt.sentAt) > 7000) return;
+      // Отсекаем только архивные реплеи релеев (isHistorical), НЕ сравнивая локальные часы разных ПК!
+      if (isHistorical) return;
       const pid = pkt.senderKey || pkt.id;
       if (!pid || pid === state.playerKey) return;
-      const isNewPlayer = !state.remotePlayers.has(pid);
-      let rp = state.remotePlayers.get(pid);
-      if (!rp) {
-        const mesh = createPlayerMesh(pkt.name || "Дачник", pkt.color || "#1565c0");
-        scene.add(mesh);
-        rp = {
-          id: pid,
-          peerId: pkt.peerId || "",
-          name: pkt.name || "Дачник",
-          color: pkt.color || "#1565c0",
-          x: pkt.x ?? 0,
-          y: pkt.y ?? 0,
-          z: pkt.z ?? 42,
-          tx: pkt.x ?? 0,
-          tz: pkt.z ?? 42,
-          ry: pkt.ry ?? 0,
-          anim: pkt.anim || "idle",
-          money: pkt.money ?? 500,
-          plotsCount: pkt.plotsCount ?? 0,
-          lastSeen: Date.now(),
-          mesh
-        };
-        state.remotePlayers.set(pid, rp);
-        updateOnlineListUI();
-        updateNetBadge();
-      } else {
-        if (pkt.name && pkt.name !== rp.name) {
-          rp.name = pkt.name;
-          scene.remove(rp.mesh);
-          rp.mesh = createPlayerMesh(rp.name, pkt.color || rp.color);
-          scene.add(rp.mesh);
-        }
-        rp.tx = typeof pkt.x === "number" ? pkt.x : rp.tx;
-        rp.tz = typeof pkt.z === "number" ? pkt.z : rp.tz;
-        rp.ry = typeof pkt.ry === "number" ? pkt.ry : rp.ry;
-        rp.anim = pkt.anim || "idle";
-        if (typeof pkt.money === "number") rp.money = pkt.money;
-        if (typeof pkt.plotsCount === "number") rp.plotsCount = pkt.plotsCount;
-        if (pkt.peerId) rp.peerId = pkt.peerId;
-        rp.lastSeen = Date.now();
-      }
-
+      const isNewPlayer = upsertRemotePlayer(pid, pkt, pkt.peerId || "");
       if (pkt.type === "player_joined" || isNewPlayer) {
+        schedulePresenceReply();
         scheduleLeaderWorldSync(pkt.peerId || "");
       }
       break;
@@ -945,10 +1174,10 @@ function handleIncomingPacket(pkt) {
   }
 }
 
-
 function sendLeaveNotification() {
   if (!state.started) return;
   const leavePkt = {
+    epoch: GAME_RESET_EPOCH,
     type: "player_left",
     pktId: `${state.playerKey}_left_${Date.now()}`,
     senderKey: state.playerKey,
@@ -976,109 +1205,192 @@ function sendLeaveNotification() {
 window.addEventListener("pagehide", sendLeaveNotification);
 window.addEventListener("beforeunload", sendLeaveNotification);
 
-let networkInitialized = false;
-function initMultiplayerNetwork() {
-  if (networkInitialized) return;
-  networkInitialized = true;
+// Фоновый пульс присутствия: если вкладка свёрнута (requestAnimationFrame на паузе), игрок не пропадает у друзей!
+setInterval(() => {
+  if (state.started && document.hidden) {
+    broadcastNetworkPacket(buildPresencePacket("player_moved", "idle"), false);
+  }
+}, 2800);
 
-  if (bcChannel) bcChannel.onmessage = (ev) => handleIncomingPacket(ev.data);
-
-  // 1. Подключаемся к единому центральному серверу ntfy.sh (WebSocket + EventSource резерв)
+function connectLiveNtfyStream() {
   try {
     const ws = new WebSocket(NTFY_WS_URL);
     ws.onopen = () => {
       ntfyConnected = true;
       updateNetBadge();
-      if (state.started) sendMyPresenceAndWorldSnapshot();
+      if (state.started) {
+        broadcastNetworkPacket({ type: "request_world_sync" }, false);
+        sendMyPresenceAndWorldSnapshot();
+      }
     };
     ws.onmessage = (ev) => {
       try {
         const wrapper = JSON.parse(ev.data);
         if (wrapper && wrapper.event === "message" && wrapper.message) {
-          handleIncomingPacket(JSON.parse(wrapper.message));
+          handleIncomingPacket(JSON.parse(wrapper.message), false);
         }
       } catch {}
     };
+    ws.onerror = () => {};
     ws.onclose = () => {
       ntfyConnected = false;
       updateNetBadge();
-      // Резервный поток через SSE (HTTPS порт 443)
       try {
         const sse = new EventSource(NTFY_SSE_URL);
         sse.onopen = () => {
           ntfyConnected = true;
           updateNetBadge();
+          if (state.started) sendMyPresenceAndWorldSnapshot();
         };
         sse.onmessage = (ev) => {
           try {
             const wrapper = JSON.parse(ev.data);
             if (wrapper && wrapper.event === "message" && wrapper.message) {
-              handleIncomingPacket(JSON.parse(wrapper.message));
+              handleIncomingPacket(JSON.parse(wrapper.message), false);
             }
           } catch {}
         };
+        sse.onerror = () => {};
       } catch {}
     };
   } catch {}
+}
 
-  // 2. Запускаем PeerJS для мгновенной передачи координат игроков напрямую (port 443)
-  try {
-    peerInstance = new Peer();
-    peerInstance.on("open", (id) => {
-      myPeerId = id;
-      updateNetBadge();
-      if (state.started) sendMyPresenceAndWorldSnapshot();
-    });
-    peerInstance.on("connection", (conn) => {
-      setupPeerConnection(conn);
-    });
-  } catch {}
+let networkInitialized = false;
+async function initMultiplayerNetwork() {
+  if (networkInitialized) return;
+  networkInitialized = true;
 
-  // 3. Подключаем публичные MQTT брокеры (включая порт 443 и 8084/8884)
-  for (const brokerUrl of [
-    "wss://mqtt.eclipseprojects.io:443/mqtt",
-    "wss://broker.emqx.io:8084/mqtt",
-    "wss://broker.hivemq.com:8884/mqtt"
-  ]) {
-    try {
-      const mc = mqtt.connect(brokerUrl, { connectTimeout: 5000, reconnectPeriod: 4000 });
-      mqttClients.push(mc);
-      mc.on("connect", () => {
-        updateNetBadge();
-        mc.subscribe(`${CENTRAL_ROOM_TOPIC}/live`);
-        const curSec = getPlayerSectorTopic();
-        mc.subscribe(curSec);
-        mc._subscribedSector = curSec;
-        if (state.started) sendMyPresenceAndWorldSnapshot();
-      });
-      mc.on("message", (_topic, payload) => {
-        try {
-          handleIncomingPacket(JSON.parse(payload.toString()));
-        } catch {}
-      });
-    } catch {}
+  if (bcChannel) {
+    bcChannel.onmessage = (ev) => handleIncomingPacket(ev.data, false);
   }
 
-  // 4. Подключаем Nostr-релеи (особенно быстро работают при включённом VPN)
-  for (const relayUrl of ["wss://nos.lol", "wss://relay.damus.io"]) {
-    try {
-      const nws = new WebSocket(relayUrl);
-      nostrSockets.push(nws);
-      nws.onopen = () => {
-        updateNetBadge();
-        nws.send(JSON.stringify(["REQ", "snt-taiga-v1", { "#t": [CENTRAL_ROOM_TOPIC], limit: 200 }]));
-        if (state.started) sendMyPresenceAndWorldSnapshot();
-      };
-      nws.onmessage = (ev) => {
+  // 1. Загружаем сохранённое состояние текущей игры (участки/доски/чат) одноразовым опросом, а живой поток слушаем без архива
+  fetch(NTFY_POLL_URL)
+    .then((r) => (r.ok ? r.text() : ""))
+    .then((text) => {
+      if (!text) return;
+      for (const line of text.split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
         try {
-          const arr = JSON.parse(ev.data);
-          if (arr[0] === "EVENT" && arr[2] && arr[2].content) {
-            handleIncomingPacket(JSON.parse(arr[2].content));
+          const wrapper = JSON.parse(trimmed);
+          if (wrapper && wrapper.event === "message" && wrapper.message) {
+            handleIncomingPacket(JSON.parse(wrapper.message), true);
           }
         } catch {}
-      };
-    } catch {}
-  }
+      }
+    })
+    .catch(() => {});
+
+  connectLiveNtfyStream();
+
+  // 2. Изолированная загрузка PeerJS (с полной поддержкой Firefox 115–157+ и защитой от отключённого WebRTC)
+  try {
+    const peerMod = await import("./vendor/peerjs.js?v=24");
+    const PeerClass = peerMod.Peer || peerMod.default;
+    if (PeerClass && typeof RTCPeerConnection !== "undefined") {
+      peerInstance = new PeerClass({
+        config: {
+          iceServers: [
+            { urls: "stun:stun.l.google.com:19302" },
+            { urls: "stun:stun1.l.google.com:19302" },
+            { urls: "stun:stun.services.mozilla.com" }
+          ]
+        }
+      });
+      peerInstance.on("error", () => {});
+      peerInstance.on("open", (id) => {
+        myPeerId = id;
+        updateNetBadge();
+        if (state.started) sendMyPresenceAndWorldSnapshot();
+      });
+      peerInstance.on("connection", (conn) => {
+        setupPeerConnection(conn);
+      });
+    }
+  } catch {}
+
+  // 3. Изолированная загрузка MQTT (с обязательным обработчиком error, чтобы Firefox не выбрасывал Unhandled error)
+  try {
+    const mqttMod = await import("./vendor/mqtt.js?v=24");
+    const mqttLib = mqttMod.default || mqttMod;
+    if (mqttLib && typeof mqttLib.connect === "function") {
+      for (const brokerUrl of [
+        "wss://mqtt.eclipseprojects.io:443/mqtt",
+        "wss://broker.emqx.io:8084/mqtt",
+        "wss://broker.hivemq.com:8884/mqtt"
+      ]) {
+        try {
+          const mc = mqttLib.connect(brokerUrl, { connectTimeout: 5500, reconnectPeriod: 4000 });
+          mc.on("error", () => {});
+          mc.on("offline", () => updateNetBadge());
+          mqttClients.push(mc);
+          mc.on("connect", () => {
+            updateNetBadge();
+            try {
+              mc.subscribe(`${CENTRAL_ROOM_TOPIC}/live`);
+              const neighbors = getNeighborSectorTopics();
+              for (const sec of neighbors) mc.subscribe(sec);
+              mc._subscribedSectors = new Set(neighbors);
+            } catch {}
+            if (state.started) {
+              broadcastNetworkPacket({ type: "request_world_sync" }, false);
+              sendMyPresenceAndWorldSnapshot();
+            }
+          });
+          mc.on("message", (_topic, payload, packet) => {
+            try {
+              const rawStr = typeof payload === "string"
+                ? payload
+                : utf8Decoder
+                  ? utf8Decoder.decode(payload)
+                  : payload.toString();
+              const isRetainedHistory = Boolean(packet && packet.retain);
+              handleIncomingPacket(JSON.parse(rawStr), isRetainedHistory);
+            } catch {}
+          });
+        } catch {}
+      }
+    }
+  } catch {}
+
+  // 4. Изолированная загрузка Nostr (разделяем исторические события до EOSE и живые события после EOSE)
+  try {
+    const nostrMod = await import("./vendor/nostr-pure.js?v=24");
+    if (nostrMod.generateSecretKey && nostrMod.finalizeEvent) {
+      sessionSk = nostrMod.generateSecretKey();
+      nostrFinalizeEvent = nostrMod.finalizeEvent;
+      for (const relayUrl of ["wss://nos.lol", "wss://relay.damus.io", "wss://relay.primal.net"]) {
+        try {
+          const nws = new WebSocket(relayUrl);
+          const entry = { ws: nws, eose: false };
+          nostrSockets.push(entry);
+          nws.onerror = () => {};
+          nws.onopen = () => {
+            updateNetBadge();
+            try {
+              nws.send(JSON.stringify(["REQ", "snt-clean-v24", { "#t": [CENTRAL_ROOM_TOPIC], limit: 200 }]));
+            } catch {}
+            if (state.started) {
+              broadcastNetworkPacket({ type: "request_world_sync" }, false);
+              sendMyPresenceAndWorldSnapshot();
+            }
+          };
+          nws.onmessage = (ev) => {
+            try {
+              const arr = JSON.parse(ev.data);
+              if (arr[0] === "EOSE") {
+                entry.eose = true;
+              } else if (arr[0] === "EVENT" && arr[2] && arr[2].content) {
+                handleIncomingPacket(JSON.parse(arr[2].content), !entry.eose);
+              }
+            } catch {}
+          };
+        } catch {}
+      }
+    }
+  } catch {}
 }
 
 // ==========================================
@@ -2851,6 +3163,15 @@ function updateHandGrab(dt) {
       mesh.updateMatrixWorld(true);
     }
   }
+
+  const nowGrabSync = Date.now();
+  if (nowGrabSync - (grabState.lastLiveSyncAt || 0) > 120) {
+    grabState.lastLiveSyncAt = nowGrabSync;
+    const livePlanks = grabState.members.map((m) => state.planks[m.id]).filter(Boolean);
+    if (livePlanks.length > 0) {
+      broadcastNetworkPacket({ type: "planks_batch", planks: livePlanks }, false);
+    }
+  }
 }
 
 function endHandGrab() {
@@ -4075,12 +4396,14 @@ window.addEventListener("mousemove", (e) => {
   if (modalBackdrop.style.display === "flex") return;
 
   if (document.pointerLockElement === canvas && state.started) {
+    const movX = Math.max(-140, Math.min(140, e.movementX || 0));
+    const movY = Math.max(-140, Math.min(140, e.movementY || 0));
     if (isGrabMouseRotateMode()) {
-      applyGrabMouseRotation(e.movementX, e.movementY, 0.0065);
+      applyGrabMouseRotation(movX, movY, 0.0065);
       return;
     }
-    state.camYaw -= e.movementX * 0.0026;
-    state.camPitch = Math.max(-1.25, Math.min(1.25, state.camPitch + e.movementY * 0.0024));
+    state.camYaw -= movX * 0.0026;
+    state.camPitch = Math.max(-1.25, Math.min(1.25, state.camPitch + movY * 0.0024));
     state.ry = state.camYaw;
     return;
   }
@@ -4121,16 +4444,17 @@ window.addEventListener("mouseup", (e) => {
 
 canvas.addEventListener("contextmenu", (e) => { e.preventDefault(); });
 canvas.addEventListener("wheel", (e) => {
+  const normDeltaY = e.deltaMode === 1 ? e.deltaY * 33 : e.deltaMode === 2 ? e.deltaY * 300 : e.deltaY;
   if (grabState.active) {
-    grabState.distance = Math.max(1.5, Math.min(7.0, grabState.distance - e.deltaY * 0.003));
+    grabState.distance = Math.max(1.5, Math.min(7.0, grabState.distance - normDeltaY * 0.003));
     return;
   }
   if (state.firstPerson) {
-    cycleHotbarSlot(e.deltaY > 0 ? 1 : -1);
+    if (normDeltaY !== 0) cycleHotbarSlot(normDeltaY > 0 ? 1 : -1);
   } else {
-    state.camDist = Math.max(4.5, Math.min(24, state.camDist + e.deltaY * 0.01));
+    state.camDist = Math.max(4.5, Math.min(24, state.camDist + normDeltaY * 0.01));
   }
-});
+}, { passive: true });
 window.addEventListener("resize", () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
@@ -4628,7 +4952,14 @@ if (btnToggleOnline && onlineBoxEl) {
 }
 
 function appendChatLine(msg) {
+  if (!msg) return;
+  if (msg.id) {
+    if (seenChatIds.has(msg.id)) return;
+    seenChatIds.add(msg.id);
+    if (seenChatIds.size > 500) seenChatIds.delete(seenChatIds.values().next().value);
+  }
   const box = document.getElementById("chat-messages");
+  if (!box) return;
   const div = document.createElement("div");
   div.className = "chat-line";
   const senderSpan = document.createElement("b");
@@ -4650,7 +4981,7 @@ function sendChatFromInput() {
   inp.value = "";
   inp.blur();
   if (!text) return;
-  const msg = { id: `${Date.now()}`, sender: state.name, color: state.color, text, time: Date.now() };
+  const msg = { id: `${state.playerKey}_chat_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`, sender: state.name, color: state.color, text, time: Date.now() };
   appendChatLine(msg);
   broadcastNetworkPacket({ type: "chat_msg", message: msg }, true);
 }
@@ -4728,22 +5059,40 @@ function updateHudUI() {
 
 function updateOnlineListUI() {
   const listEl = document.getElementById("online-list");
+  if (!listEl) return;
   listEl.innerHTML = "";
   const myPlotsCount = Object.values(state.plots).filter((p) => p.ownerKey === state.playerKey).length;
-  const all = [{ name: `${state.name} (Вы)`, color: state.color, plots: myPlotsCount, money: state.money }];
+  const all = [{ name: `${state.name || "Дачник"} (Вы)`, color: state.color, plots: myPlotsCount, money: Math.round(state.money), dist: null }];
+  const now = Date.now();
   for (const rp of state.remotePlayers.values()) {
-    if (Date.now() - rp.lastSeen < 90_000) {
-      all.push({ name: rp.name, color: rp.color, plots: rp.plotsCount || 0, money: rp.money || 500 });
+    if (now - rp.lastSeen < 22_000) {
+      const distMeters = Math.round(Math.hypot((rp.x || 0) - state.x, (rp.z || 0) - state.z));
+      all.push({
+        name: rp.name || "Дачник",
+        color: rp.color || "#29b6f6",
+        plots: rp.plotsCount || 0,
+        money: Math.round(rp.money ?? 500),
+        dist: distMeters
+      });
     }
   }
-  document.getElementById("online-count").textContent = String(all.length);
+  const cntEl = document.getElementById("online-count");
+  if (cntEl) cntEl.textContent = String(all.length);
   const mobOnlineEl = document.getElementById("mob-online-count");
   if (mobOnlineEl) mobOnlineEl.textContent = String(all.length);
   updateMobileControlsUI();
   all.forEach((p) => {
     const row = document.createElement("div");
     row.className = "online-item";
-    row.innerHTML = `<span style="color:${p.color};font-weight:700;">● ${p.name}</span><span>${p.plots} уч. • ${p.money} ₽</span>`;
+    const leftSpan = document.createElement("span");
+    leftSpan.style.color = p.color;
+    leftSpan.style.fontWeight = "700";
+    leftSpan.textContent = `● ${p.name}`;
+    const rightSpan = document.createElement("span");
+    rightSpan.textContent = p.dist !== null
+      ? `${p.dist} м • ${p.plots} уч. • ${p.money} ₽`
+      : `${p.plots} уч. • ${p.money} ₽`;
+    row.append(leftSpan, rightSpan);
     listEl.appendChild(row);
   });
 }
@@ -4892,8 +5241,8 @@ document.querySelectorAll(".color-swatch").forEach((sw) => {
 function resetPlayerProgressAndObjects() {
   const nick = (nickInput?.value || state.name || "").trim();
   removeObjectsByOwner(nick || state.name, state.playerKey, true);
-  localStorage.removeItem(PROFILE_STORAGE_KEY);
-  localStorage.removeItem(WORLD_PLANKS_STORAGE_KEY);
+  safeStorageRemove(PROFILE_STORAGE_KEY);
+  safeStorageRemove(WORLD_PLANKS_STORAGE_KEY);
   setTimeout(() => window.location.reload(), 120);
 }
 
@@ -4940,24 +5289,20 @@ function startGame() {
   lockPointerSafe();
   broadcastNetworkPacket({ type: "request_world_sync" }, false);
   sendMyPresenceAndWorldSnapshot();
+  setTimeout(() => {
+    if (!state.started) return;
+    broadcastNetworkPacket({ type: "request_world_sync" }, false);
+    broadcastNetworkPacket(buildPresencePacket("player_joined"), false);
+  }, 1200);
+  setTimeout(() => {
+    if (!state.started) return;
+    broadcastNetworkPacket(buildPresencePacket("player_joined"), false);
+  }, 3200);
 
   appendChatLine({
     sender: "СНТ-Инфо",
     color: "#81c784",
     text: `Добро пожаловать, ${state.name}! У вас 500 ₽ — подойдите к табличке любого участка и нажмите [E], чтобы купить дачу за 300 ₽!`
-  });
-
-  const myPlotsCount = Object.values(state.plots).filter((p) => p.ownerKey === state.playerKey).length;
-  broadcastNetworkPacket({
-    type: "player_joined",
-    name: state.name,
-    color: state.color,
-    x: state.x,
-    y: state.y,
-    z: state.z,
-    ry: state.ry,
-    money: state.money,
-    plotsCount: myPlotsCount
   });
 }
 
@@ -5063,16 +5408,27 @@ function animate(now) {
   for (const [, rp] of state.remotePlayers.entries()) {
     const dx = rp.tx - rp.x;
     const dz = rp.tz - rp.z;
+    const targetY = typeof rp.ty === "number" ? rp.ty : getTerrainHeight(rp.x, rp.z);
+    const dy = targetY - rp.y;
     const dist = Math.hypot(dx, dz);
-    rp.x += dx * Math.min(1, dt * 10);
-    rp.z += dz * Math.min(1, dt * 10);
+    if (dist > 35) {
+      rp.x = rp.tx;
+      rp.z = rp.tz;
+      rp.y = targetY;
+    } else {
+      rp.x += dx * Math.min(1, dt * 10);
+      rp.z += dz * Math.min(1, dt * 10);
+      rp.y += dy * Math.min(1, dt * 12);
+    }
+    const terrainFloor = getTerrainHeight(rp.x, rp.z);
+    if (rp.y < terrainFloor) rp.y = terrainFloor;
     const distSqToMe = (rp.x - state.x) * (rp.x - state.x) + (rp.z - state.z) * (rp.z - state.z);
-    rp.mesh.visible = distSqToMe < 185 * 185;
+    rp.mesh.visible = distSqToMe < 255 * 255;
     if (rp.mesh.visible) {
-      rp.y = getTerrainHeight(rp.x, rp.z);
       rp.mesh.position.set(rp.x, rp.y, rp.z);
       rp.mesh.rotation.y = rp.ry;
-      animatePlayerMesh(rp.mesh, dt, elapsedSec, dist > 0.05, rp.anim === "work");
+      const walking = dist > 0.04 || (rp.anim === "walk" && Date.now() - rp.lastSeen < 650);
+      animatePlayerMesh(rp.mesh, dt, elapsedSec, walking, rp.anim === "work");
     }
   }
 
@@ -5179,22 +5535,11 @@ function animate(now) {
   }
 
   netSyncAccum += dt;
-  const syncInterval = isMoving ? 0.26 : 5.0;
+  const syncInterval = isMoving ? 0.22 : 1.8;
   if (state.started && netSyncAccum > syncInterval) {
     netSyncAccum = 0;
-    const myPlotsCount = Object.values(state.plots).filter((p) => p.ownerKey === state.playerKey).length;
-    broadcastNetworkPacket({
-      type: "player_moved",
-      name: state.name,
-      color: state.color,
-      x: Number(state.x.toFixed(2)),
-      y: Number(state.y.toFixed(2)),
-      z: Number(state.z.toFixed(2)),
-      ry: Number(state.ry.toFixed(2)),
-      anim: state.workTimer > 0 ? "work" : isMoving ? "walk" : "idle",
-      money: Math.round(state.money),
-      plotsCount: myPlotsCount
-    });
+    const animState = state.workTimer > 0 ? "work" : isMoving ? "walk" : "idle";
+    broadcastNetworkPacket(buildPresencePacket("player_moved", animState), false);
   }
 
   if (state.started && state.firstPerson) {

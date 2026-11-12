@@ -1,5 +1,5 @@
-import * as THREE from "three";
-import { CHUNK_SIZE, getTerrainHeight, getSurfaceType } from "./world.js?v=23";
+import * as THREE from "./vendor/three.js?v=24";
+import { CHUNK_SIZE, getTerrainHeight, getSurfaceType } from "./world.js?v=24";
 
 // ==========================================
 // ПРОЦЕДУРНЫЕ БЕСШОВНЫЕ ТЕКСТУРЫ (Трава, Береста, Кора сосны, Доски, Брус, Кирпич, Листва)
@@ -1266,6 +1266,7 @@ export function createPlayerMesh(name, jacketColor = "#2e7d32") {
     { bg: "rgba(15, 30, 18, 0.88)", border: jacketColor }
   );
   nameBadge.position.set(0, 2.75, 0);
+  nameBadge.renderOrder = 999;
 
   g.add(leftLeg, rightLeg, torso, leftArm, rightArm, head, brim, crown, nameBadge);
   g.userData = { leftLeg, rightLeg, leftArm, rightArm, torso, nameBadge, jacketMat, heldHolder, currentHeldKey: "" };

@@ -71,9 +71,9 @@ export default class DachaServer implements Party.Server {
     this.initialized = true;
     try {
       const resetEpoch = await this.room.storage.get<string>("resetEpoch");
-      if (resetEpoch !== "dacha3_taiga_clean_epoch_v1") {
+      if (resetEpoch !== "dacha3_clean_epoch_v24_20261112") {
         await this.room.storage.deleteAll();
-        await this.room.storage.put("resetEpoch", "dacha3_taiga_clean_epoch_v1");
+        await this.room.storage.put("resetEpoch", "dacha3_clean_epoch_v24_20261112");
       }
       const savedPlots = await this.room.storage.get<Record<string, PlotOwnership>>("plots");
       if (savedPlots) this.plots = savedPlots;

@@ -4,6 +4,7 @@
   padding: 0;
   user-select: none;
   -webkit-user-select: none;
+  -moz-user-select: none;
   -webkit-touch-callout: none;
   font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
 }
@@ -106,6 +107,7 @@ html, body {
   outline: none;
   user-select: text;
   -webkit-user-select: text;
+  -moz-user-select: text;
 }
 
 .form-group input:focus {
@@ -554,6 +556,7 @@ html, body {
   backdrop-filter: blur(6px);
   touch-action: pan-x;
   -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
 }
 
 #inventory-bar::-webkit-scrollbar {
@@ -684,6 +687,7 @@ html, body {
   outline: none;
   user-select: text;
   -webkit-user-select: text;
+  -moz-user-select: text;
 }
 
 #chat-send {
