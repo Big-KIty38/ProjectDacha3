@@ -1,11 +1,12 @@
-import * as THREE from "./vendor/three.js?v=24";
+import * as THREE from "./vendor/three.js?v=25";
 import {
   CHUNK_SIZE,
   getTerrainHeight,
+  getSurfaceType,
   getChunkLayout,
   hasEastWestHighway,
   hasNorthSouthHighway
-} from "./world.js?v=24";
+} from "./world.js?v=25";
 import {
   ITEMS,
   CROPS,
@@ -14,7 +15,7 @@ import {
   SHOP_GOODS,
   BAZAAR_PRICES,
   playSfx
-} from "./data.js?v=24";
+} from "./data.js?v=25";
 import {
   createTerrainChunkMesh,
   createChunkResourcesBatch,
@@ -30,8 +31,9 @@ import {
   createPhysicalPlankMesh,
   rebuildPlankNailsMesh,
   createSingleNailMesh,
+  createFoundationMesh,
   animatePlayerMesh
-} from "./models.js?v=24";
+} from "./models.js?v=25";
 
 // Безопасная обёртка над localStorage для Firefox (при строгой защите от отслеживания / запрете куки не выбрасывает SecurityError)
 const memoryStorageFallback = new Map();
@@ -146,6 +148,7 @@ const state = {
 };
 
 const WORLD_PLANKS_STORAGE_KEY = "project_dacha3_planks_v24";
+const WORLD_FOUNDATIONS_STORAGE_KEY = "project_dacha3_foundations_v24";
 
 function loadSavedWorldPlanks() {
   try {
@@ -162,8 +165,24 @@ function saveWorldPlanks() {
   } catch {}
 }
 
+function loadSavedWorldFoundations() {
+  try {
+    const raw = safeStorageGet(WORLD_FOUNDATIONS_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveWorldFoundations() {
+  try {
+    safeStorageSet(WORLD_FOUNDATIONS_STORAGE_KEY, JSON.stringify(state.foundations || {}));
+  } catch {}
+}
+
 state.structures = {};
 state.planks = loadSavedWorldPlanks();
+state.foundations = loadSavedWorldFoundations();
 state.plankSpawnYaw = 0;
 
 if (!savedProfile?.plankSystemV9) {
@@ -174,8 +193,13 @@ if (!savedProfile?.plankSystemV9) {
     state.inv.berry = 3;
   }
 }
+if (!savedProfile?.foundationSystemV25) {
+  state.inv.foundation_block = Math.max(state.inv.foundation_block || 0, 8);
+  state.inv.nails = Math.max(state.inv.nails || 0, 35);
+}
 state.tools.hammer = true;
 state.tools.saw = true;
+state.tools.shovel = true;
 
 function saveLocalProfile() {
   try {
@@ -194,6 +218,7 @@ function saveLocalProfile() {
         inv: state.inv,
         plots: state.plots,
         plankSystemV9: true,
+        foundationSystemV25: true,
         structures: {},
         harvested: state.harvested
       })
@@ -282,6 +307,32 @@ const structureMeshes = new Map();
 const planksRoot = new THREE.Group();
 scene.add(planksRoot);
 const plankMeshes = new Map();
+
+const foundationsRoot = new THREE.Group();
+scene.add(foundationsRoot);
+const foundationMeshes = new Map();
+
+const pitPreviewMesh = createFoundationMesh({ id: "ghost_pit", stage: "pit", x: 0, z: 0, groundY: 0, topY: 0.28, w: 0.64, d: 0.64 });
+pitPreviewMesh.traverse((c) => {
+  if (c.isMesh && c.material) {
+    c.material = c.material.clone();
+    c.material.transparent = true;
+    c.material.opacity = 0.55;
+  }
+});
+pitPreviewMesh.visible = false;
+scene.add(pitPreviewMesh);
+
+const foundationPreviewMesh = createFoundationMesh({ id: "ghost_block", stage: "block", hasPit: false, x: 0, z: 0, groundY: 0, topY: 0.28, w: 0.64, d: 0.64 });
+foundationPreviewMesh.traverse((c) => {
+  if (c.isMesh && c.material) {
+    c.material = c.material.clone();
+    c.material.transparent = true;
+    c.material.opacity = 0.55;
+  }
+});
+foundationPreviewMesh.visible = false;
+scene.add(foundationPreviewMesh);
 
 const nailPreviewGroup = new THREE.Group();
 const nailPreviewInner = createSingleNailMesh({ id: "preview", lx: 0, ly: 0, lz: 0, nx: 0, ny: 1, nz: 0, depth: 0.25 });
@@ -612,7 +663,7 @@ function setupPeerConnection(conn) {
       try {
         conn.send(buildPresencePacket("player_joined"));
       } catch {}
-      if (Object.keys(state.plots).length > 0 || Object.keys(state.planks).length > 0) {
+      if (Object.keys(state.plots).length > 0 || Object.keys(state.planks).length > 0 || Object.keys(state.foundations).length > 0) {
         try {
           conn.send({
             epoch: GAME_RESET_EPOCH,
@@ -624,6 +675,7 @@ function setupPeerConnection(conn) {
             senderMeta: buildSenderMeta(),
             plots: state.plots,
             planks: state.planks,
+            foundations: state.foundations,
             harvested: state.harvested
           });
         } catch {}
@@ -868,7 +920,12 @@ function sendMyPresenceAndWorldSnapshot(targetPeerId = "") {
   if (!state.started) return;
   broadcastNetworkPacket(buildPresencePacket("player_joined"), false);
 
-  if (Object.keys(state.plots).length === 0 && Object.keys(state.planks).length === 0 && Object.keys(state.harvested).length === 0) {
+  if (
+    Object.keys(state.plots).length === 0 &&
+    Object.keys(state.planks).length === 0 &&
+    Object.keys(state.foundations).length === 0 &&
+    Object.keys(state.harvested).length === 0
+  ) {
     return;
   }
 
@@ -882,6 +939,7 @@ function sendMyPresenceAndWorldSnapshot(targetPeerId = "") {
     senderMeta: buildSenderMeta(),
     plots: state.plots,
     planks: state.planks,
+    foundations: state.foundations,
     harvested: state.harvested
   };
 
@@ -924,6 +982,16 @@ function mergeWorldSnapshot(pkt) {
   }
   if (changedPlots) refreshAllPlotSigns();
 
+  if (pkt.foundations && typeof pkt.foundations === "object") {
+    for (const [fid, fdata] of Object.entries(pkt.foundations)) {
+      if (fdata && fdata.id) {
+        state.foundations[fid] = fdata;
+        spawnOrUpdateFoundationMesh(fdata);
+      }
+    }
+    saveWorldFoundations();
+  }
+
   if (pkt.planks && typeof pkt.planks === "object") {
     for (const [pid, pdata] of Object.entries(pkt.planks)) {
       if (pdata && pdata.id) {
@@ -931,6 +999,7 @@ function mergeWorldSnapshot(pkt) {
         spawnOrUpdatePlankMesh(pdata);
       }
     }
+    recomputePlankGroupsAndJoints();
     saveWorldPlanks();
   }
 
@@ -1114,12 +1183,26 @@ function handleIncomingPacket(pkt, isHistorical = false) {
       saveLocalProfile();
       break;
     }
+    case "foundation_updated": {
+      const fnd = pkt.foundation;
+      if (!fnd || !fnd.id) return;
+      state.foundations[fnd.id] = fnd;
+      spawnOrUpdateFoundationMesh(fnd);
+      recomputePlankGroupsAndJoints();
+      saveWorldFoundations();
+      break;
+    }
+    case "foundation_removed": {
+      if (pkt.id) removeFoundationById(pkt.id, false);
+      break;
+    }
     case "plank_placed":
     case "plank_updated": {
       const pl = pkt.plank;
       if (!pl || !pl.id) return;
       state.planks[pl.id] = pl;
       spawnOrUpdatePlankMesh(pl);
+      recomputePlankGroupsAndJoints();
       saveWorldPlanks();
       break;
     }
@@ -1131,6 +1214,7 @@ function handleIncomingPacket(pkt, isHistorical = false) {
             spawnOrUpdatePlankMesh(pl);
           }
         }
+        recomputePlankGroupsAndJoints();
         saveWorldPlanks();
       }
       break;
@@ -1287,7 +1371,7 @@ async function initMultiplayerNetwork() {
 
   // 2. Изолированная загрузка PeerJS (с полной поддержкой Firefox 115–157+ и защитой от отключённого WebRTC)
   try {
-    const peerMod = await import("./vendor/peerjs.js?v=24");
+    const peerMod = await import("./vendor/peerjs.js?v=25");
     const PeerClass = peerMod.Peer || peerMod.default;
     if (PeerClass && typeof RTCPeerConnection !== "undefined") {
       peerInstance = new PeerClass({
@@ -1313,7 +1397,7 @@ async function initMultiplayerNetwork() {
 
   // 3. Изолированная загрузка MQTT (с обязательным обработчиком error, чтобы Firefox не выбрасывал Unhandled error)
   try {
-    const mqttMod = await import("./vendor/mqtt.js?v=24");
+    const mqttMod = await import("./vendor/mqtt.js?v=25");
     const mqttLib = mqttMod.default || mqttMod;
     if (mqttLib && typeof mqttLib.connect === "function") {
       for (const brokerUrl of [
@@ -1357,7 +1441,7 @@ async function initMultiplayerNetwork() {
 
   // 4. Изолированная загрузка Nostr (разделяем исторические события до EOSE и живые события после EOSE)
   try {
-    const nostrMod = await import("./vendor/nostr-pure.js?v=24");
+    const nostrMod = await import("./vendor/nostr-pure.js?v=25");
     if (nostrMod.generateSecretKey && nostrMod.finalizeEvent) {
       sessionSk = nostrMod.generateSecretKey();
       nostrFinalizeEvent = nostrMod.finalizeEvent;
@@ -1707,18 +1791,28 @@ export function getHeldItemTitle(id = state.heldItem, short = false) {
   }
   if (id === "nails") {
     return compact
-      ? `🔩 Гвозди (${state.inv.nails || 0} шт.)`
-      : `🔩 Гвозди (${state.inv.nails || 0} шт. • ЛКМ по доске — воткнуть гвоздь)`;
+      ? `🔩 Гвозди / Анкер (${state.inv.nails || 0} шт.)`
+      : `🔩 Гвозди (${state.inv.nails || 0} шт. • 1 гвоздь = шарнир, 2 = жёстко • Над блоком ФБС = анкер!)`;
   }
   if (id === "hammer") {
     return compact
-      ? "🔨 Молоток"
-      : "🔨 Молоток (ЛКМ по гвоздю — забивать в доску и сбивать доски)";
+      ? "🔨 Молоток и Гвоздодёр"
+      : "🔨 Молоток (ЛКМ по гвоздю/анкеру — забивать • Удержание ПКМ — вытянуть гвоздодёром)";
   }
   if (id === "saw") {
     return compact
       ? "🪚 Пила-ножовка"
       : "🪚 Пила-ножовка (ЛКМ по доске — отпилить часть доски по красной метке)";
+  }
+  if (id === "shovel") {
+    return compact
+      ? "🪏 Лопата"
+      : "🪏 Штыковая лопата (ЛКМ по земле — выкопать лунку под фундамент • ПКМ по лунке — закопать)";
+  }
+  if (id === "foundation_block") {
+    return compact
+      ? `🧱 Блок ФБС (${state.inv.foundation_block || 0} шт.)`
+      : `🧱 Бетонный блок ФБС (${state.inv.foundation_block || 0} шт. • ЛКМ — поставить в лунку/на землю, выравнивает склон!)`;
   }
   if (id === "axe") return state.tools.axe ? "🪓 Стальной топор (x2 дерево)" : "🪓 Топор дачника";
   if (id === "watering_can") return "🚿 Садовая лейка";
@@ -1770,6 +1864,8 @@ function getHotbarSlots() {
     { id: "nails", icon: "🔩", name: "Гвозди", count: state.inv.nails || 0, kind: "item" },
     { id: "hammer", icon: "🔨", name: "Молоток", count: null, kind: "tool" },
     { id: "saw", icon: "🪚", name: "Пила", count: null, kind: "tool" },
+    { id: "shovel", icon: "🪏", name: "Лопата", count: null, kind: "tool" },
+    { id: "foundation_block", icon: "🧱", name: "Блок ФБС", count: state.inv.foundation_block || 0, kind: "item" },
     { id: "axe", icon: "🪓", name: state.tools.axe ? "Сталь. топор" : "Топор", count: null, kind: "tool" }
   ];
   if (state.tools.watering_can) {
@@ -1820,7 +1916,7 @@ function selectHeldItem(id, silent = false) {
     showToast("🍓 У вас пока нет ягод! Соберите их с ягодного куста [E] или купите пирожок в Магазине.");
     return;
   }
-  if (ITEMS[id] && id !== "nails" && id !== "plank" && (state.inv[id] || 0) <= 0) {
+  if (ITEMS[id] && id !== "nails" && id !== "plank" && id !== "foundation_block" && (state.inv[id] || 0) <= 0) {
     state.heldItem = "hand";
   } else {
     state.heldItem = id;
@@ -1896,10 +1992,11 @@ function openInventoryModal() {
   modalBody.innerHTML = "";
 
   const baseTools = [
-    { id: "hand", icon: "✋", name: "Пустая рука", desc: "Для сбора ягод, камней и ухода за огородом." },
-    { id: "axe", icon: "🪓", name: state.tools.axe ? "Стальной топор (x2 дерево)" : "Топор дачника", desc: "Держите в руке [2], чтобы рубить берёзы и сосны." },
-    { id: "hammer", icon: "🔨", name: "Строительный молоток", desc: "Держите в руке [4] для забивания гвоздей и сбивания досок." },
-    { id: "saw", icon: "🪚", name: "Пила-ножовка по дереву", desc: "Держите в руке [5] и нажмите ЛКМ по доске, чтобы отпилить от неё часть нужной длины." }
+    { id: "hand", icon: "✋", name: "Пустая рука", desc: "Для переноски досок, вращения шарнирных стропил и сбора ягод." },
+    { id: "hammer", icon: "🔨", name: "Молоток с гвоздодёром", desc: "ЛКМ — забивать гвозди и фундаментные анкеры. Удержание ПКМ — вытягивать гвозди обратно со скрежетом без потери материалов!" },
+    { id: "saw", icon: "🪚", name: "Пила-ножовка по дереву", desc: "ЛКМ по доске — отпилить часть нужной длины по красной разметке." },
+    { id: "shovel", icon: "🪏", name: "Штыковая лопата", desc: "ЛКМ по земле — выкопать ровную щебёночную лунку под блок ФБС; ПКМ по пустой лунке — закопать." },
+    { id: "axe", icon: "🪓", name: state.tools.axe ? "Стальной топор (x2 дерево)" : "Топор дачника", desc: "Рубка берёз и сосен в тайге на брёвна." }
   ];
   if (state.tools.watering_can) {
     baseTools.push({ id: "watering_can", icon: "🚿", name: "Садовая лейка", desc: "Автоматический полив при посадке семян." });
@@ -1946,7 +2043,7 @@ function openInventoryModal() {
 
   Object.entries(ITEMS).forEach(([key, info]) => {
     const cnt = state.inv[key] || 0;
-    if (cnt <= 0 && key !== "nails" && key !== "plank") return;
+    if (cnt <= 0 && key !== "nails" && key !== "plank" && key !== "foundation_block") return;
     const isHeld = state.heldItem === key;
     const stashed = isStashedInBackpack(key);
     const card = document.createElement("div");
@@ -2052,45 +2149,59 @@ function openBuildModal() {
     closeModal(true);
     return;
   }
-  modalTitle.textContent = "🪵 Строительство из физических досок и гвоздей";
-  modalSubtitle.textContent = "Все готовые постройки убраны — стройте собственные конструкции из досок с физикой и гвоздей!";
+  modalTitle.textContent = "🪵 Реалистичное строительство: Фундамент, Шарниры и Гвоздодёр";
+  modalSubtitle.textContent = "Возводите неподвижный фундамент на склоне, собирайте стропила на шарнирах и разбирайте узлы без потерь:";
   modalBody.innerHTML = `
     <div class="card-item">
       <div>
-        <div class="card-title">🪵 1. Установка досок с физикой (В наличии: <span style="color:#ffd54f">${state.inv.plank || 0} шт.</span>)</div>
-        <div class="card-desc">Возьмите <b>Доску [2]</b> в руку и нажмите <b>ЛКМ</b> (или <b>[E]</b>), чтобы поставить её. Клавиша <b>[R]</b> поворачивает доску перед установкой.</div>
+        <div class="card-title">🧱 1. Фундамент: Лунки лопатой и Блоки ФБС (<span style="color:#ffd54f">${state.inv.foundation_block || 0} шт.</span>)</div>
+        <div class="card-desc">Выкопайте <b>Лопатой [6]</b> лунки по углам (ЛКМ) и поставьте <b>Блоки ФБС [7]</b> — они автоматически выравнивают высоту по горизонту даже на склоне! Положите сверху обвязку, воткните <b>Крепёж [3]</b> над блоком и забейте <b>Молотком [4]</b> — анкер сделает основание дома неподвижным (<b>static</b>).</div>
       </div>
-      <button class="card-btn" id="modal-take-plank">🖐️ Взять Доску в руку [2]</button>
+      <div style="display:flex;gap:6px;">
+        <button class="card-btn" id="modal-take-shovel" style="flex:1;">🪏 Лопата [6]</button>
+        <button class="card-btn" id="modal-take-fbs" style="flex:1;">🧱 Блок ФБС [7]</button>
+      </div>
     </div>
     <div class="card-item">
       <div>
-        <div class="card-title">✋ 2. Перемещение и вращение пустой рукой [1]</div>
-        <div class="card-desc">Держа <b>Пустую руку [1]</b>, удерживайте <b>ЛКМ</b> на доске, чтобы переносить её. Удерживая <b>ЛКМ + R</b> (или <b>Q / E / ПКМ / Shift</b>), вращайте доску или сбитую конструкцию!</div>
+        <div class="card-title">🔩 2. Физика узлов: 1 гвоздь = шарнир, 2 гвоздя = жёстко (<span style="color:#ffd54f">${state.inv.nails || 0} шт.</span>)</div>
+        <div class="card-desc"><b>1 забитый гвоздь</b> соединяет доски шарнирно — доска проворачивается вокруг оси гвоздя под своим весом или рукой (удобно примерять стропила!). Забейте <b>2-й гвоздь</b> или поставьте <b>диагональную укосину</b> (треугольник), чтобы заблокировать узел намертво.</div>
+      </div>
+      <div style="display:flex;gap:6px;">
+        <button class="card-btn" id="modal-take-plank" style="flex:1;">🪵 Доска [2]</button>
+        <button class="card-btn" id="modal-take-nails" style="flex:1;">🔩 Гвозди [3]</button>
+      </div>
+    </div>
+    <div class="card-item">
+      <div>
+        <div class="card-title">🔨 3. Молоток и Гвоздодёр — разборка без потерь [4]</div>
+        <div class="card-desc"><b>ЛКМ</b> молотком забивает гвозди и анкеры (25% → 100%). <b>Зажатие ПКМ</b> (или кнопка «Гвоздодёр» на телефоне) цепляет шляпку обратной стороной молотка и со скрежетом вытягивает гвоздь/анкер обратно в инвентарь, сохраняя и доски, и крепёж!</div>
+      </div>
+      <button class="card-btn" id="modal-take-hammer">🔨 Взять Молоток / Гвоздодёр [4]</button>
+    </div>
+    <div class="card-item">
+      <div>
+        <div class="card-title">✋ 4. Ручной перенос и примерка стропил [1]</div>
+        <div class="card-desc">Держа <b>Пустую руку [1]</b>, зажмите <b>ЛКМ</b> на доске для переноса (или плавного поворота доски на 1-гвоздевом шарнире!). Свободные конструкции вращаются через <b>ЛКМ + Q / E / R + мышь</b>.</div>
       </div>
       <button class="card-btn" id="modal-take-hand">✋ Взять Пустую руку [1]</button>
     </div>
-    <div class="card-item">
-      <div>
-        <div class="card-title">🔩 3. Установка гвоздей в любое место доски (В наличии: <span style="color:#ffd54f">${state.inv.nails || 0} шт.</span>)</div>
-        <div class="card-desc">Возьмите <b>Гвозди [3]</b>, наведите прицел на любое место доски и нажмите <b>ЛКМ</b> — гвоздь частично погрузится в доску (на 25%).</div>
-      </div>
-      <button class="card-btn" id="modal-take-nails">🔩 Взять Гвозди в руку [3]</button>
-    </div>
-    <div class="card-item">
-      <div>
-        <div class="card-title">🔨 4. Забивание гвоздя и параллельное склеивание [4]</div>
-        <div class="card-desc">Возьмите <b>Молоток [4]</b> и нажимайте <b>ЛКМ</b> по гвоздю, забивая его всё глубже (25% → 50% → 75% → 100%). Если две доски лежат друг на друге и гвоздь забит до конца в месте их пересечения — доски станут параллельно друг другу относительно шляпки гвоздя и склеятся!</div>
-      </div>
-      <button class="card-btn" id="modal-take-hammer">🔨 Взять Молоток в руку [4]</button>
-    </div>
     <div class="card-item" style="grid-column:1/-1;">
       <div>
-        <div class="card-title">📦 Пополнить запас досок и гвоздей</div>
-        <div class="card-desc">Доски пилятся из брёвен в Крафте [C], продаются в Магазине или берутся бесплатным набором здесь:</div>
+        <div class="card-title">📦 Строительный комплект дачника</div>
+        <div class="card-desc">Блоки ФБС и гвозди можно скрафтить из камня в [C], купить в «Сельпо» или пополнить здесь:</div>
       </div>
-      <button class="card-btn" id="modal-free-kit" style="background:#ef6c00;">🎁 Взять +20 Досок и +30 Гвоздей</button>
+      <button class="card-btn" id="modal-free-kit" style="background:#ef6c00;">🎁 Взять +20 Досок, +30 Гвоздей/Анкеров и +8 Блоков ФБС</button>
     </div>
   `;
+  modalBody.querySelector("#modal-take-shovel").addEventListener("click", () => {
+    selectHeldItem("shovel");
+    closeModal(true);
+  });
+  modalBody.querySelector("#modal-take-fbs").addEventListener("click", () => {
+    selectHeldItem("foundation_block");
+    closeModal(true);
+  });
   modalBody.querySelector("#modal-take-plank").addEventListener("click", () => {
     selectHeldItem("plank");
     closeModal(true);
@@ -2110,8 +2221,9 @@ function openBuildModal() {
   modalBody.querySelector("#modal-free-kit").addEventListener("click", () => {
     state.inv.plank = (state.inv.plank || 0) + 20;
     state.inv.nails = (state.inv.nails || 0) + 30;
+    state.inv.foundation_block = (state.inv.foundation_block || 0) + 8;
     playSfx("build");
-    showToast("🪵 Получено +20 досок и +30 гвоздей!");
+    showToast("🧱 Получено +20 досок, +30 гвоздей и +8 блоков ФБС!");
     updateHudUI();
     saveLocalProfile();
     openBuildModal();
@@ -2274,19 +2386,51 @@ function openGardenCareModal(struct) {
 }
 
 // ==========================================
-// ФИЗИКА ДОСОК, ГВОЗДИ, МОЛОТОК, ЗАХВАТ РУКОЙ И ПРИВЯЗКА К НИКУ
+// ФУНДАМЕНТ (ЛУНКИ + БЛОКИ ФБС + АНКЕРЫ), ШАРНИРНЫЕ / ЖЁСТКИЕ УЗЛЫ, ГВОЗДОДЁР И 3D-ФИЗИКА
 // ==========================================
 const buildBanner = document.getElementById("build-banner");
-const buildSelectedName = document.getElementById("build-selected-name");
 const centerRaycaster = new THREE.Raycaster();
 const centerScreenPt = new THREE.Vector2(0, 0);
 
+// Активные шарнирные соединения (1 гвоздь между двумя группами досок) и пары сбитых досок
+let activePlankHinges = [];
+const nailedPlankPairs = new Set();
 
+function makePairKey(idA, idB) {
+  return idA < idB ? `${idA}|${idB}` : `${idB}|${idA}`;
+}
 
 function exitBuildMode() {
   state.buildMode = null;
   if (buildBanner) buildBanner.style.display = "none";
   buildGhostGroup.visible = false;
+}
+
+function spawnOrUpdateFoundationMesh(fData) {
+  if (!fData || !fData.id) return;
+  const old = foundationMeshes.get(fData.id);
+  if (old) {
+    foundationsRoot.remove(old);
+    foundationMeshes.delete(fData.id);
+  }
+  const mesh = createFoundationMesh(fData);
+  foundationsRoot.add(mesh);
+  foundationMeshes.set(fData.id, mesh);
+  mesh.updateMatrixWorld(true);
+}
+
+function removeFoundationById(id, broadcast = true) {
+  delete state.foundations[id];
+  const old = foundationMeshes.get(id);
+  if (old) {
+    foundationsRoot.remove(old);
+    foundationMeshes.delete(id);
+  }
+  recomputePlankGroupsAndJoints();
+  saveWorldFoundations();
+  if (broadcast) {
+    broadcastNetworkPacket({ type: "foundation_removed", id }, true);
+  }
 }
 
 function spawnOrUpdatePlankMesh(plank) {
@@ -2317,6 +2461,7 @@ function removePlankById(id, broadcast = true) {
     planksRoot.remove(m);
     plankMeshes.delete(id);
   }
+  recomputePlankGroupsAndJoints();
   saveWorldPlanks();
   if (broadcast) {
     broadcastNetworkPacket({ type: "plank_removed", id }, true);
@@ -2336,17 +2481,221 @@ function removeObjectsByOwner(ownerName, ownerKey, broadcast = true) {
       }
     }
   }
+  for (const [fid, fnd] of Object.entries(state.foundations)) {
+    const fName = String(fnd.ownerName || "").trim().toLowerCase();
+    if ((normName && fName === normName) || (ownerKey && fnd.ownerKey === ownerKey)) {
+      delete state.foundations[fid];
+      const fm = foundationMeshes.get(fid);
+      if (fm) {
+        foundationsRoot.remove(fm);
+        foundationMeshes.delete(fid);
+      }
+    }
+  }
   for (const [plotId, plotData] of Object.entries(state.plots)) {
     const pName = String(plotData.ownerName || "").trim().toLowerCase();
     if ((normName && pName === normName) || (ownerKey && plotData.ownerKey === ownerKey)) {
       delete state.plots[plotId];
     }
   }
+  recomputePlankGroupsAndJoints();
   refreshAllPlotSigns();
   saveWorldPlanks();
+  saveWorldFoundations();
   saveLocalProfile();
   if (broadcast) {
     broadcastNetworkPacket({ type: "clear_owner_objects", ownerName, ownerKey }, true);
+  }
+}
+
+// Пересчёт жёстких групп (2+ гвоздя или замкнутый треугольник с укосиной), 1-гвоздевых шарниров и анкеровки к ФБС
+function recomputePlankGroupsAndJoints() {
+  const plankIds = Object.keys(state.planks);
+  nailedPlankPairs.clear();
+  activePlankHinges = [];
+  if (plankIds.length === 0) return;
+
+  const parent = new Map();
+  for (const id of plankIds) parent.set(id, id);
+  const find = (x) => {
+    let r = x;
+    while (parent.get(r) !== r) r = parent.get(r);
+    let c = x;
+    while (c !== r) {
+      const nxt = parent.get(c);
+      parent.set(c, r);
+      c = nxt;
+    }
+    return r;
+  };
+  const union = (a, b) => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra === rb) return false;
+    if (ra < rb) parent.set(rb, ra);
+    else parent.set(ra, rb);
+    return true;
+  };
+
+  const validLinks = [];
+  const directlyAnchoredPlanks = new Set();
+
+  for (const plA of Object.values(state.planks)) {
+    if (!Array.isArray(plA.nails)) continue;
+    const qA = new THREE.Quaternion(plA.qx || 0, plA.qy || 0, plA.qz || 0, plA.qw ?? 1).normalize();
+    const cA = new THREE.Vector3(plA.x, plA.y, plA.z);
+
+    for (const nail of plA.nails) {
+      if ((nail.depth ?? 0) < 0.99) {
+        nail.weldedToPlankId = null;
+        nail.anchoredToBlockId = null;
+        continue;
+      }
+
+      if (nail.anchoredToBlockId) {
+        const blk = state.foundations[nail.anchoredToBlockId];
+        if (blk && blk.stage === "block") {
+          directlyAnchoredPlanks.add(plA.id);
+        } else {
+          nail.anchoredToBlockId = null;
+        }
+      }
+
+      if (nail.weldedToPlankId) {
+        const plB = state.planks[nail.weldedToPlankId];
+        if (!plB || plB.id === plA.id) {
+          nail.weldedToPlankId = null;
+          continue;
+        }
+        nailedPlankPairs.add(makePairKey(plA.id, plB.id));
+
+        const worldPivotA = new THREE.Vector3(nail.lx || 0, nail.ly || 0, nail.lz || 0).applyQuaternion(qA).add(cA);
+        const worldAxisA = new THREE.Vector3(nail.nx ?? 0, nail.ny ?? 1, nail.nz ?? 0).applyQuaternion(qA).normalize();
+
+        if (typeof nail.targetLx !== "number" || typeof nail.targetNx !== "number") {
+          const qB = new THREE.Quaternion(plB.qx || 0, plB.qy || 0, plB.qz || 0, plB.qw ?? 1).normalize();
+          const invQB = qB.clone().invert();
+          const locB = worldPivotA.clone().sub(new THREE.Vector3(plB.x, plB.y, plB.z)).applyQuaternion(invQB);
+          const axB = worldAxisA.clone().applyQuaternion(invQB).normalize();
+          nail.targetLx = +locB.x.toFixed(4);
+          nail.targetLy = +locB.y.toFixed(4);
+          nail.targetLz = +locB.z.toFixed(4);
+          nail.targetNx = +axB.x.toFixed(4);
+          nail.targetNy = +axB.y.toFixed(4);
+          nail.targetNz = +axB.z.toFixed(4);
+        }
+
+        validLinks.push({
+          idA: plA.id,
+          idB: plB.id,
+          plA,
+          plB,
+          nail,
+          pivot: worldPivotA
+        });
+      }
+    }
+  }
+
+  let mergedSomething = true;
+  let iterGuard = 0;
+  while (mergedSomething && iterGuard++ < 16) {
+    mergedSomething = false;
+    const pairBuckets = new Map();
+    for (const lnk of validLinks) {
+      const rA = find(lnk.idA);
+      const rB = find(lnk.idB);
+      if (rA === rB) continue;
+      const key = makePairKey(rA, rB);
+      if (!pairBuckets.has(key)) pairBuckets.set(key, { rA, rB, pivots: [] });
+      pairBuckets.get(key).pivots.push(lnk.pivot);
+    }
+
+    for (const bucket of pairBuckets.values()) {
+      if (bucket.pivots.length >= 2) {
+        let distinct = false;
+        for (let i = 0; i < bucket.pivots.length && !distinct; i++) {
+          for (let j = i + 1; j < bucket.pivots.length; j++) {
+            if (bucket.pivots[i].distanceToSquared(bucket.pivots[j]) > 0.032 * 0.032) {
+              distinct = true;
+              break;
+            }
+          }
+        }
+        if (distinct && union(bucket.rA, bucket.rB)) {
+          mergedSomething = true;
+        }
+      }
+    }
+    if (mergedSomething) continue;
+
+    // Проверка треугольников с укосиной: R1 - R2 - R3 - R1
+    const adj = new Map();
+    for (const bucket of pairBuckets.values()) {
+      const u = find(bucket.rA);
+      const v = find(bucket.rB);
+      if (u === v) continue;
+      if (!adj.has(u)) adj.set(u, new Map());
+      if (!adj.has(v)) adj.set(v, new Map());
+      adj.get(u).set(v, bucket.pivots[0]);
+      adj.get(v).set(u, bucket.pivots[0]);
+    }
+    for (const [u, neighborsU] of adj.entries()) {
+      if (neighborsU.size < 2) continue;
+      const nList = Array.from(neighborsU.keys());
+      for (let i = 0; i < nList.length && !mergedSomething; i++) {
+        for (let j = i + 1; j < nList.length; j++) {
+          const v = nList[i];
+          const w = nList[j];
+          const neighborsV = adj.get(v);
+          if (neighborsV && neighborsV.has(w)) {
+            const pUV = neighborsU.get(v);
+            const pUW = neighborsU.get(w);
+            const pVW = neighborsV.get(w);
+            if (
+              pUV.distanceToSquared(pUW) > 0.045 * 0.045 &&
+              pUV.distanceToSquared(pVW) > 0.045 * 0.045 &&
+              pUW.distanceToSquared(pVW) > 0.045 * 0.045
+            ) {
+              union(u, v);
+              union(v, w);
+              mergedSomething = true;
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  const anchoredRoots = new Set();
+  for (const pid of directlyAnchoredPlanks) {
+    if (parent.has(pid)) anchoredRoots.add(find(pid));
+  }
+
+  for (const pl of Object.values(state.planks)) {
+    const r = find(pl.id);
+    pl.groupId = `grp_${r}`;
+    pl.isAnchored = anchoredRoots.has(r);
+    if (pl.isAnchored) {
+      pl.vx = 0; pl.vy = 0; pl.vz = 0;
+      pl.wx = 0; pl.wy = 0; pl.wz = 0;
+    }
+  }
+
+  const seenHingePair = new Set();
+  for (const lnk of validLinks) {
+    if (lnk.plA.groupId !== lnk.plB.groupId) {
+      const hKey = makePairKey(lnk.plA.groupId, lnk.plB.groupId);
+      if (!seenHingePair.has(hKey)) {
+        seenHingePair.add(hKey);
+        activePlankHinges.push({
+          plA: lnk.plA,
+          plB: lnk.plB,
+          nail: lnk.nail
+        });
+      }
+    }
   }
 }
 
@@ -2387,11 +2736,283 @@ function raycastPlankSurface(maxDist = 6.2) {
   };
 }
 
+function raycastTerrainPoint(maxDist = 5.8) {
+  const origin = new THREE.Vector3();
+  const dir = new THREE.Vector3();
+  camera.getWorldPosition(origin);
+  camera.getWorldDirection(dir);
+
+  let prevT = 0.6;
+  let prevDiff = origin.y + dir.y * prevT - getTerrainHeight(origin.x + dir.x * prevT, origin.z + dir.z * prevT);
+  for (let t = 0.75; t <= maxDist; t += 0.12) {
+    const wx = origin.x + dir.x * t;
+    const wy = origin.y + dir.y * t;
+    const wz = origin.z + dir.z * t;
+    const gY = getTerrainHeight(wx, wz);
+    const diff = wy - gY;
+    if (diff <= 0 && prevDiff >= 0) {
+      let lo = prevT;
+      let hi = t;
+      for (let k = 0; k < 6; k++) {
+        const mid = (lo + hi) * 0.5;
+        const mx = origin.x + dir.x * mid;
+        const my = origin.y + dir.y * mid;
+        const mz = origin.z + dir.z * mid;
+        if (my - getTerrainHeight(mx, mz) > 0) lo = mid;
+        else hi = mid;
+      }
+      const hitT = (lo + hi) * 0.5;
+      const hx = origin.x + dir.x * hitT;
+      const hz = origin.z + dir.z * hitT;
+      return { x: hx, y: getTerrainHeight(hx, hz), z: hz, dist: hitT };
+    }
+    prevT = t;
+    prevDiff = diff;
+  }
+  return null;
+}
+
+function raycastFoundationAtCrosshair(maxDist = 6.0) {
+  centerRaycaster.setFromCamera(centerScreenPt, camera);
+  centerRaycaster.far = maxDist;
+  const boxes = [];
+  for (const fm of foundationMeshes.values()) {
+    fm.traverse((c) => {
+      if (c.userData && c.userData.isFoundationHitbox) boxes.push(c);
+    });
+  }
+  if (boxes.length > 0) {
+    const hits = centerRaycaster.intersectObjects(boxes, false);
+    if (hits.length > 0) {
+      const fid = hits[0].object.userData.foundationId;
+      if (fid && state.foundations[fid]) {
+        return { foundation: state.foundations[fid], point: hits[0].point.clone(), dist: hits[0].distance };
+      }
+    }
+  }
+  const terr = raycastTerrainPoint(maxDist);
+  if (terr) {
+    let best = null;
+    let bestD = 0.62;
+    for (const fnd of Object.values(state.foundations)) {
+      const d = Math.hypot(fnd.x - terr.x, fnd.z - terr.z);
+      if (d < bestD) {
+        bestD = d;
+        best = fnd;
+      }
+    }
+    if (best) return { foundation: best, point: new THREE.Vector3(best.x, best.topY || best.groundY, best.z), dist: terr.dist };
+  }
+  return null;
+}
+
+function computeAutoLeveledBlockTopY(x, z, groundY, hasPit) {
+  const maxRise = hasPit ? 0.85 : 0.56;
+  const minRise = 0.14;
+  let nearestDistSq = Infinity;
+  let refTopY = null;
+
+  for (const f of Object.values(state.foundations)) {
+    if (f.stage !== "block") continue;
+    const dx = f.x - x;
+    const dz = f.z - z;
+    const dSq = dx * dx + dz * dz;
+    if (dSq > 0.05 && dSq <= 13.5 * 13.5 && dSq < nearestDistSq) {
+      const neededRise = f.topY - groundY;
+      if (neededRise >= minRise && neededRise <= maxRise) {
+        nearestDistSq = dSq;
+        refTopY = f.topY;
+      }
+    }
+  }
+  return +(refTopY !== null ? refTopY : groundY + 0.28).toFixed(3);
+}
+
+function getFoundationPlacementPreview() {
+  const fHit = raycastFoundationAtCrosshair(5.8);
+  if (fHit && fHit.foundation.stage === "pit") {
+    const pit = fHit.foundation;
+    const topY = computeAutoLeveledBlockTopY(pit.x, pit.z, pit.groundY, true);
+    return { mode: "upgrade_pit", pit, x: pit.x, z: pit.z, groundY: pit.groundY, topY, yaw: pit.yaw || state.plankSpawnYaw };
+  }
+  const terr = raycastTerrainPoint(5.8);
+  if (!terr) return null;
+  for (const f of Object.values(state.foundations)) {
+    if (f.stage === "pit" && Math.hypot(f.x - terr.x, f.z - terr.z) < 0.85) {
+      const topY = computeAutoLeveledBlockTopY(f.x, f.z, f.groundY, true);
+      return { mode: "upgrade_pit", pit: f, x: f.x, z: f.z, groundY: f.groundY, topY, yaw: f.yaw || state.plankSpawnYaw };
+    }
+  }
+  const topY = computeAutoLeveledBlockTopY(terr.x, terr.z, terr.y, false);
+  return { mode: "ground", pit: null, x: terr.x, z: terr.z, groundY: terr.y, topY, yaw: state.plankSpawnYaw };
+}
+
+function checkPlotPermissionAt(x, z) {
+  const surfType = getSurfaceType(x, z);
+  if (surfType === "asphalt") {
+    showToast("⚠️ Нельзя копать и строить на асфальтовой трассе!");
+    return false;
+  }
+  const plot = findPlotAt(x, z);
+  if (plot) {
+    const owner = state.plots[plot.plotId];
+    if (owner && owner.ownerKey !== state.playerKey && owner.ownerName !== state.name) {
+      showToast(`⚠️ Это чужой участок (${owner.ownerName})!`);
+      return false;
+    }
+  }
+  return true;
+}
+
+function digFoundationPitAction() {
+  const terr = raycastTerrainPoint(5.6);
+  if (!terr) {
+    state.workTimer = 0.3;
+    showToast("🪏 Наведите прицел на землю поближе (до 5.5 м) и нажмите ЛКМ, чтобы выкопать лунку под фундамент!");
+    return;
+  }
+  if (!checkPlotPermissionAt(terr.x, terr.z)) return;
+
+  for (const f of Object.values(state.foundations)) {
+    if (Math.hypot(f.x - terr.x, f.z - terr.z) < 0.62) {
+      showToast(
+        f.stage === "pit"
+          ? "🕳️ Здесь уже выкопана лунка! Возьмите Блок ФБС [7], чтобы установить фундамент (или ПКМ лопатой, чтобы закопать)."
+          : "🧱 Здесь уже стоит фундаментный блок ФБС!"
+      );
+      return;
+    }
+  }
+
+  const id = `fnd_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const fnd = {
+    id,
+    stage: "pit",
+    hasPit: true,
+    x: +terr.x.toFixed(3),
+    z: +terr.z.toFixed(3),
+    groundY: +terr.y.toFixed(3),
+    topY: +(terr.y + 0.28).toFixed(3),
+    yaw: +(state.plankSpawnYaw || 0).toFixed(4),
+    w: 0.64,
+    d: 0.64,
+    ownerName: state.name,
+    ownerKey: state.playerKey
+  };
+  state.foundations[id] = fnd;
+  spawnOrUpdateFoundationMesh(fnd);
+  state.workTimer = 0.42;
+  playSfx("dig");
+  showToast("🪏 Выкопана щебёночная лунка под фундамент! Поставьте в неё Блок ФБС [7].");
+  saveWorldFoundations();
+  broadcastNetworkPacket({ type: "foundation_updated", foundation: fnd }, true);
+}
+
+function fillFoundationPitAtCrosshairAction() {
+  const hit = raycastFoundationAtCrosshair(5.8);
+  if (!hit || hit.foundation.stage !== "pit") {
+    showToast("🪏 Наведите прицел на пустую лунку и нажмите ПКМ, чтобы закопать её.");
+    return;
+  }
+  const f = hit.foundation;
+  if (f.ownerKey && f.ownerKey !== state.playerKey && f.ownerName !== state.name) {
+    showToast(`⚠️ Эта лунка выкопана игроком ${f.ownerName}!`);
+    return;
+  }
+  removeFoundationById(f.id, true);
+  state.workTimer = 0.35;
+  playSfx("dig");
+  showToast("🪏 Лунка аккуратно закопана обратно.");
+}
+
+function placeFoundationBlockAction() {
+  if ((state.inv.foundation_block || 0) <= 0) {
+    showToast("❌ Нет блоков ФБС! Скрафтите из камня в [C], купите в Магазине или возьмите в меню [B].");
+    return;
+  }
+  const target = getFoundationPlacementPreview();
+  if (!target) {
+    showToast("🧱 Наведите прицел на выкопанную лунку или землю поближе, чтобы поставить блок ФБС!");
+    return;
+  }
+  if (!checkPlotPermissionAt(target.x, target.z)) return;
+
+  if (target.mode === "ground") {
+    for (const f of Object.values(state.foundations)) {
+      if (Math.hypot(f.x - target.x, f.z - target.z) < 0.62) {
+        showToast("⚠️ Слишком близко к соседнему блоку ФБС!");
+        return;
+      }
+    }
+  }
+
+  state.inv.foundation_block--;
+  let fnd;
+  if (target.mode === "upgrade_pit" && target.pit) {
+    fnd = target.pit;
+    fnd.stage = "block";
+    fnd.hasPit = true;
+    fnd.topY = target.topY;
+  } else {
+    const id = `fnd_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    fnd = {
+      id,
+      stage: "block",
+      hasPit: false,
+      x: +target.x.toFixed(3),
+      z: +target.z.toFixed(3),
+      groundY: +target.groundY.toFixed(3),
+      topY: target.topY,
+      yaw: +(target.yaw || 0).toFixed(4),
+      w: 0.64,
+      d: 0.64,
+      ownerName: state.name,
+      ownerKey: state.playerKey
+    };
+    state.foundations[id] = fnd;
+  }
+
+  spawnOrUpdateFoundationMesh(fnd);
+  recomputePlankGroupsAndJoints();
+  state.workTimer = 0.4;
+  playSfx("concrete");
+  const slopeDiffCm = Math.round((fnd.topY - fnd.groundY) * 100);
+  showToast(
+    fnd.hasPit
+      ? `🧱 Блок ФБС установлен в лунку по уровню (+${slopeDiffCm} см над грунтом)! Уложите обвязку и закрепите анкером [3]+[4].`
+      : `🧱 Блок ФБС установлен (+${slopeDiffCm} см)! Для больших уклонов можно копать лунки Лопатой [6].`
+  );
+  saveWorldFoundations();
+  saveLocalProfile();
+  updateHudUI();
+  broadcastNetworkPacket({ type: "foundation_updated", foundation: fnd }, true);
+}
+
+function findFoundationBlockUnderPoint(worldPt, maxVertDist = 0.175) {
+  let best = null;
+  let bestScore = Infinity;
+  for (const f of Object.values(state.foundations)) {
+    if (f.stage !== "block") continue;
+    const halfW = (f.w || 0.64) * 0.62;
+    const halfD = (f.d || 0.64) * 0.62;
+    const dx = Math.abs(worldPt.x - f.x);
+    const dz = Math.abs(worldPt.z - f.z);
+    const dy = worldPt.y - f.topY;
+    if (dx <= halfW && dz <= halfD && dy >= -0.04 && dy <= maxVertDist) {
+      const score = Math.hypot(dx, dz) + dy;
+      if (score < bestScore) {
+        bestScore = score;
+        best = f;
+      }
+    }
+  }
+  return best;
+}
+
 function findNailForHammer(maxDist = 6.0) {
   centerRaycaster.setFromCamera(centerScreenPt, camera);
   centerRaycaster.far = maxDist;
 
-  // 1. Проверка прямого попадания луча в хитбокс гвоздя
   const nailHitboxes = [];
   for (const m of plankMeshes.values()) {
     if (m.userData.nailsHolder) {
@@ -2413,7 +3034,6 @@ function findNailForHammer(maxDist = 6.0) {
     }
   }
 
-  // 2. Поиск ближайшего гвоздя вокруг точки прицела на доске (в радиусе 0.55 м)
   const surf = raycastPlankSurface(maxDist);
   if (surf) {
     let best = null;
@@ -2438,11 +3058,22 @@ function findNailForHammer(maxDist = 6.0) {
 }
 
 function getPlankSpawnTransform() {
-  const surf = raycastPlankSurface(5.2);
+  const surf = raycastPlankSurface(6.2);
   const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, state.camYaw + state.plankSpawnYaw, 0, "YXZ"));
   if (surf) {
-    const pos = surf.point.clone().addScaledVector(surf.worldNormal, 0.075);
+    const pUp = new THREE.Vector3(0, 1, 0).applyQuaternion(
+      new THREE.Quaternion(surf.plank.qx || 0, surf.plank.qy || 0, surf.plank.qz || 0, surf.plank.qw ?? 1)
+    );
+    if (Math.abs(surf.worldNormal.y) < 0.5 && Math.abs(pUp.y) > 0.75) {
+      return { x: surf.plank.x, y: surf.plank.y + (surf.plank.h || 0.12) * 0.5 + 0.065, z: surf.plank.z, q };
+    }
+    const pos = surf.point.clone().addScaledVector(surf.worldNormal, 0.065);
     return { x: pos.x, y: pos.y, z: pos.z, q };
+  }
+  const fHit = raycastFoundationAtCrosshair(6.2);
+  if (fHit && fHit.foundation.stage === "block") {
+    const blk = fHit.foundation;
+    return { x: blk.x, y: blk.topY + 0.065, z: blk.z, q };
   }
   const dir = new THREE.Vector3();
   camera.getWorldDirection(dir);
@@ -2462,14 +3093,8 @@ function placePhysicalPlankAction() {
     return;
   }
   const tr = getPlankSpawnTransform();
-  const plot = findPlotAt(tr.x, tr.z);
-  if (plot) {
-    const owner = state.plots[plot.plotId];
-    if (owner && owner.ownerKey !== state.playerKey && owner.ownerName !== state.name) {
-      showToast(`⚠️ Нельзя ставить доски на чужом участке (${owner.ownerName})!`);
-      return;
-    }
-  }
+  if (!checkPlotPermissionAt(tr.x, tr.z)) return;
+
   state.inv.plank--;
   const id = `pl_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const plank = {
@@ -2488,6 +3113,7 @@ function placePhysicalPlankAction() {
     vy: 0,
     vz: 0,
     groupId: `grp_${id}`,
+    isAnchored: false,
     ownerName: state.name,
     ownerKey: state.playerKey,
     nails: []
@@ -2496,7 +3122,7 @@ function placePhysicalPlankAction() {
   spawnOrUpdatePlankMesh(plank);
   state.workTimer = 0.32;
   playSfx("build");
-  showToast(`🪵 Доска установлена (привязана к нику ${state.name})!`);
+  showToast(`🪵 Доска установлена!`);
   saveWorldPlanks();
   saveLocalProfile();
   updateHudUI();
@@ -2505,14 +3131,18 @@ function placePhysicalPlankAction() {
 
 function placeNailAtCrosshairAction() {
   if ((state.inv.nails || 0) <= 0) {
-    showToast("❌ Нет гвоздей! Выкуйте в Крафте [C], купите в Магазине или возьмите в меню [B].");
+    showToast("❌ Нет гвоздей/анкеров! Скрафтите в [C], купите в Магазине или возьмите в меню [B].");
     return;
   }
-  const surf = raycastPlankSurface(5.8);
+  const surf = raycastPlankSurface(6.2);
   if (!surf) {
-    showToast("🔩 Наведите прицел на любое место доски и нажмите ЛКМ, чтобы поставить гвоздь!");
+    showToast("🔩 Наведите прицел на доску и нажмите ЛКМ, чтобы поставить гвоздь (или анкер над блоком ФБС)!");
     return;
   }
+
+  const underBlock = findFoundationBlockUnderPoint(surf.point, 0.175);
+  const isAnchor = Boolean(underBlock && surf.worldNormal.y > 0.45 && (surf.plank.y - underBlock.topY) <= 0.135);
+
   state.inv.nails--;
   const plank = surf.plank;
   if (!Array.isArray(plank.nails)) plank.nails = [];
@@ -2525,20 +3155,80 @@ function placeNailAtCrosshairAction() {
     ny: +surf.localNormal.y.toFixed(4),
     nz: +surf.localNormal.z.toFixed(4),
     depth: 0.25,
+    isAnchor,
+    candidateBlockId: underBlock ? underBlock.id : null,
+    anchoredToBlockId: null,
     weldedToPlankId: null
   };
   plank.nails.push(nail);
   spawnOrUpdatePlankMesh(plank);
   state.workTimer = 0.32;
   playSfx("pick");
-  showToast("🔩 Гвоздь установлен в доску (погружён на 25%). Забейте его Молотком [4]!");
+  showToast(
+    isAnchor
+      ? "⚓ Вставлен фундаментный анкер с шайбой (25%)! Забейте его Молотком [4] для жёсткой фиксации обвязки к блоку ФБС!"
+      : "🔩 Гвоздь наживлён (25%). Забейте Молотком [4] (1 гвоздь = шарнир, 2 гвоздя = жёсткий узел)!"
+  );
   saveWorldPlanks();
   saveLocalProfile();
   updateHudUI();
   broadcastNetworkPacket({ type: "plank_updated", plank }, true);
 }
 
-// Находит ближайшую ортогональную (под 90° или 0°/180°) ориентацию доски A относительно осей доски B
+function checkAndAnchorPlankToFoundation(plank, nail) {
+  const mesh = plankMeshes.get(plank.id);
+  if (!mesh) return false;
+  mesh.updateMatrixWorld(true);
+  const nailWorldPos = new THREE.Vector3(nail.lx, nail.ly, nail.lz).applyMatrix4(mesh.matrixWorld);
+
+  let blk = nail.candidateBlockId ? state.foundations[nail.candidateBlockId] : null;
+  if (!blk || blk.stage !== "block") {
+    blk = findFoundationBlockUnderPoint(nailWorldPos, 0.175);
+  }
+  if (!blk || blk.stage !== "block" || (plank.y - blk.topY) > 0.135) return false;
+
+  if (!plank.isAnchored) {
+    const grpId = plank.groupId || `grp_${plank.id}`;
+    const groupMembers = Object.values(state.planks).filter((p) => (p.groupId || `grp_${p.id}`) === grpId);
+    const curQ = new THREE.Quaternion(plank.qx || 0, plank.qy || 0, plank.qz || 0, plank.qw ?? 1).normalize();
+    const euler = new THREE.Euler().setFromQuaternion(curQ, "YXZ");
+    const levelQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, euler.y, 0, "YXZ"));
+    const dq = levelQ.clone().multiply(curQ.clone().invert()).normalize();
+
+    for (const mp of groupMembers) {
+      const mq = new THREE.Quaternion(mp.qx || 0, mp.qy || 0, mp.qz || 0, mp.qw ?? 1).normalize();
+      mq.premultiply(dq).normalize();
+      mp.qx = +mq.x.toFixed(5);
+      mp.qy = +mq.y.toFixed(5);
+      mp.qz = +mq.z.toFixed(5);
+      mp.qw = +mq.w.toFixed(5);
+
+      const rel = new THREE.Vector3(mp.x, mp.y, mp.z).sub(nailWorldPos).applyQuaternion(dq);
+      mp.x = +(nailWorldPos.x + rel.x).toFixed(4);
+      mp.y = +(nailWorldPos.y + rel.y).toFixed(4);
+      mp.z = +(nailWorldPos.z + rel.z).toFixed(4);
+    }
+
+    const desiredY = blk.topY + (plank.h || 0.12) * 0.5;
+    const shiftY = desiredY - plank.y;
+    for (const mp of groupMembers) {
+      mp.y = +(mp.y + shiftY).toFixed(4);
+      mp.vx = 0; mp.vy = 0; mp.vz = 0;
+      mp.wx = 0; mp.wy = 0; mp.wz = 0;
+      spawnOrUpdatePlankMesh(mp);
+    }
+  }
+
+  nail.isAnchor = true;
+  nail.anchoredToBlockId = blk.id;
+  recomputePlankGroupsAndJoints();
+  spawnOrUpdatePlankMesh(plank);
+
+  const synced = Object.values(state.planks).filter((p) => p.groupId === plank.groupId);
+  broadcastNetworkPacket({ type: "planks_batch", planks: synced }, true);
+  return true;
+}
+
 function computeSnappedOrthogonalQuaternion(qA, qB) {
   const axesA = [
     new THREE.Vector3(1, 0, 0).applyQuaternion(qA).normalize(),
@@ -2551,14 +3241,9 @@ function computeSnappedOrthogonalQuaternion(qA, qB) {
     new THREE.Vector3(0, 0, 1).applyQuaternion(qB).normalize()
   ];
 
-  // Перебираем все 24 правые ортогональные ориентации куба относительно доски B и выбираем ближайшую к текущему повороту доски A
   const perms = [
-    [0, 1, 2],
-    [0, 2, 1],
-    [1, 0, 2],
-    [1, 2, 0],
-    [2, 0, 1],
-    [2, 1, 0]
+    [0, 1, 2], [0, 2, 1], [1, 0, 2],
+    [1, 2, 0], [2, 0, 1], [2, 1, 0]
   ];
   let bestScore = -Infinity;
   let bestMat = null;
@@ -2570,15 +3255,13 @@ function computeSnappedOrthogonalQuaternion(qA, qB) {
           const v0 = axesB[i0].clone().multiplyScalar(s0);
           const v1 = axesB[i1].clone().multiplyScalar(s1);
           const v2 = axesB[i2].clone().multiplyScalar(s2);
-          // Проверка правой тройки векторов (det = +1)
           const cross01 = new THREE.Vector3().crossVectors(v0, v1);
           if (cross01.dot(v2) < 0.9) continue;
 
           const score = v0.dot(axesA[0]) + v1.dot(axesA[1]) + v2.dot(axesA[2]);
           if (score > bestScore) {
             bestScore = score;
-            const m = new THREE.Matrix4().makeBasis(v0, v1, v2);
-            bestMat = m;
+            bestMat = new THREE.Matrix4().makeBasis(v0, v1, v2);
           }
         }
       }
@@ -2591,10 +3274,9 @@ function computeSnappedOrthogonalQuaternion(qA, qB) {
   return outQ;
 }
 
-// Выравнивание и прибивание досок (сверху внахлёст, с боковых частей, в торец и под прямым углом 90°) без багов и проваливаний
 function checkAndWeldOverlappingPlanksAtNail(plankA, nail) {
   const meshA = plankMeshes.get(plankA.id);
-  if (!meshA) return false;
+  if (!meshA) return null;
   meshA.updateMatrixWorld(true);
 
   const nailWorldPos = new THREE.Vector3(nail.lx, nail.ly, nail.lz).applyMatrix4(meshA.matrixWorld);
@@ -2602,21 +3284,15 @@ function checkAndWeldOverlappingPlanksAtNail(plankA, nail) {
     .transformDirection(meshA.matrixWorld)
     .normalize();
 
-  // Является ли гвоздь забитым с боковой части / торца доски A
-  const isSideNailOnA = Math.abs(nail.nx || 0) > 0.5 || Math.abs(nail.nz || 0) > 0.5;
-
-  // Ищем вторую доску B в месте пересечения со стержнем гвоздя или вплотную к боковой грани около гвоздя
   let targetPlankB = null;
   let bestScore = Infinity;
 
   for (const plankB of Object.values(state.planks)) {
     if (plankB.id === plankA.id) continue;
-    if (plankB.groupId && plankB.groupId === plankA.groupId) continue;
     const meshB = plankMeshes.get(plankB.id);
     if (!meshB) continue;
     meshB.updateMatrixWorld(true);
 
-    // 1. Точки вдоль оси забивания гвоздя
     for (const t of [-0.12, -0.04, 0.0, 0.06, 0.14, 0.22, 0.32, 0.42]) {
       const sampleWorld = nailWorldPos.clone().addScaledVector(nailNormalWorld, -t);
       const localInB = meshB.worldToLocal(sampleWorld.clone());
@@ -2630,7 +3306,6 @@ function checkAndWeldOverlappingPlanksAtNail(plankA, nail) {
       }
     }
 
-    // 2. Также проверяем случай, когда гвоздь забит около бокового стыка двух досок
     const nailInB = meshB.worldToLocal(nailWorldPos.clone());
     const bx = Math.max(0, Math.abs(nailInB.x) - (plankB.w || 2.4) / 2);
     const by = Math.max(0, Math.abs(nailInB.y) - (plankB.h || 0.12) / 2);
@@ -2642,170 +3317,185 @@ function checkAndWeldOverlappingPlanksAtNail(plankA, nail) {
     }
   }
 
-  if (!targetPlankB) return false;
+  if (!targetPlankB) return null;
 
-  const meshB = plankMeshes.get(targetPlankB.id);
-  meshB.updateMatrixWorld(true);
+  const groupAId = plankA.groupId || `grp_${plankA.id}`;
+  const groupBId = targetPlankB.groupId || `grp_${targetPlankB.id}`;
+  const alreadySameRigidGroup = groupAId === groupBId;
 
-  const qA = new THREE.Quaternion(plankA.qx || 0, plankA.qy || 0, plankA.qz || 0, plankA.qw ?? 1).normalize();
-  const qB = new THREE.Quaternion(targetPlankB.qx || 0, targetPlankB.qy || 0, targetPlankB.qz || 0, targetPlankB.qw ?? 1).normalize();
-
-  // Вычисляем точный ортогональный поворот (0° параллельно или 90° прямой угол по всем осям относительно доски B)
-  const snappedQA = computeSnappedOrthogonalQuaternion(qA, qB);
-  const deltaQuat = snappedQA.clone().multiply(qA.clone().invert()).normalize();
-
-  const oldGroupA = plankA.groupId || `grp_${plankA.id}`;
-  const newGroupId = targetPlankB.groupId || `grp_${targetPlankB.id}`;
-  targetPlankB.groupId = newGroupId;
-
-  const groupAMembers = Object.values(state.planks).filter((p) => (p.groupId || `grp_${p.id}`) === oldGroupA);
-
-  // Поворачиваем доску A (и прикреплённые к ней доски) вокруг точки гвоздя в точный прямой/параллельный угол
-  for (const mPlank of groupAMembers) {
-    const mQuat = new THREE.Quaternion(mPlank.qx || 0, mPlank.qy || 0, mPlank.qz || 0, mPlank.qw ?? 1).normalize();
-    mQuat.premultiply(deltaQuat).normalize();
-    mPlank.qx = +mQuat.x.toFixed(5);
-    mPlank.qy = +mQuat.y.toFixed(5);
-    mPlank.qz = +mQuat.z.toFixed(5);
-    mPlank.qw = +mQuat.w.toFixed(5);
-
-    const relPos = new THREE.Vector3(mPlank.x, mPlank.y, mPlank.z).sub(nailWorldPos);
-    relPos.applyQuaternion(deltaQuat);
-    const newPos = nailWorldPos.clone().add(relPos);
-    mPlank.x = +newPos.x.toFixed(4);
-    mPlank.y = +newPos.y.toFixed(4);
-    mPlank.z = +newPos.z.toFixed(4);
-  }
-
-  // Вычисляем полуразмеры доски A и доски B в локальной системе координат доски B
-  const invQB = qB.clone().invert();
-  const relQAInB = invQB.clone().multiply(snappedQA).normalize();
-  const axA0 = new THREE.Vector3(1, 0, 0).applyQuaternion(relQAInB);
-  const axA1 = new THREE.Vector3(0, 1, 0).applyQuaternion(relQAInB);
-  const axA2 = new THREE.Vector3(0, 0, 1).applyQuaternion(relQAInB);
-  const eA0 = (plankA.w || 2.4) / 2;
-  const eA1 = (plankA.h || 0.12) / 2;
-  const eA2 = (plankA.d || 0.36) / 2;
-
-  const halfAInB = {
-    x: Math.abs(axA0.x) * eA0 + Math.abs(axA1.x) * eA1 + Math.abs(axA2.x) * eA2,
-    y: Math.abs(axA0.y) * eA0 + Math.abs(axA1.y) * eA1 + Math.abs(axA2.y) * eA2,
-    z: Math.abs(axA0.z) * eA0 + Math.abs(axA1.z) * eA1 + Math.abs(axA2.z) * eA2
-  };
-  const halfB = {
-    x: (targetPlankB.w || 2.4) / 2,
-    y: (targetPlankB.h || 0.12) / 2,
-    z: (targetPlankB.d || 0.36) / 2
-  };
-
-  // Координаты центра доски A в локальной системе доски B
-  const centerBWorld = new THREE.Vector3(targetPlankB.x, targetPlankB.y, targetPlankB.z);
-  const centerAWorld = new THREE.Vector3(plankA.x, plankA.y, plankA.z);
-  const localCenterA = centerAWorld.clone().sub(centerBWorld).applyQuaternion(invQB);
-
-  // Универсальное выравнивание в локальных осях доски B (работает для лежачих, стоящих на ребре и вертикальных досок)
-  const pen = {
-    x: halfB.x + halfAInB.x - Math.abs(localCenterA.x),
-    y: halfB.y + halfAInB.y - Math.abs(localCenterA.y),
-    z: halfB.z + halfAInB.z - Math.abs(localCenterA.z)
-  };
-
-  // Ось контакта — та, вдоль которой пересечение минимально (грань соприкосновения двух досок)
-  let contactAxis = "y";
-  if (pen.x <= pen.y && pen.x <= pen.z) contactAxis = "x";
-  else if (pen.z <= pen.x && pen.z <= pen.y) contactAxis = "z";
-
-  const targetLocalA = localCenterA.clone();
-  const signContact = localCenterA[contactAxis] >= 0 ? 1 : -1;
-  // Ставим доску A вплотную к грани доски B без пересечения и без зазора
-  targetLocalA[contactAxis] = signContact * (halfB[contactAxis] + halfAInB[contactAxis]);
-
-  // По двум остальным осям аккуратно выравниваем края заподлицо, если они близки (например, общее основание на земле или угол 90°)
-  for (const ax of ["x", "y", "z"]) {
-    if (ax === contactAxis) continue;
-    const flushOffset = Math.abs(halfB[ax] - halfAInB[ax]);
-    if (flushOffset < 0.02 && Math.abs(localCenterA[ax]) < 0.16) {
-      targetLocalA[ax] = 0;
-    } else {
-      const signAx = localCenterA[ax] >= 0 ? 1 : -1;
-      if (Math.abs(Math.abs(localCenterA[ax]) - flushOffset) < 0.16) {
-        targetLocalA[ax] = signAx * flushOffset;
+  let existingJointNails = 0;
+  for (const p of Object.values(state.planks)) {
+    if (!Array.isArray(p.nails)) continue;
+    const g1 = p.groupId || `grp_${p.id}`;
+    for (const nl of p.nails) {
+      if (nl.id === nail.id || (nl.depth ?? 0) < 0.99 || !nl.weldedToPlankId) continue;
+      const other = state.planks[nl.weldedToPlankId];
+      if (!other) continue;
+      const g2 = other.groupId || `grp_${other.id}`;
+      if ((g1 === groupAId && g2 === groupBId) || (g1 === groupBId && g2 === groupAId)) {
+        existingJointNails++;
       }
     }
   }
 
-  const localShift = targetLocalA.sub(localCenterA);
-  const worldShift = localShift.applyQuaternion(qB);
+  if (!alreadySameRigidGroup && existingJointNails === 0 && !plankA.isAnchored) {
+    const qA = new THREE.Quaternion(plankA.qx || 0, plankA.qy || 0, plankA.qz || 0, plankA.qw ?? 1).normalize();
+    const qB = new THREE.Quaternion(targetPlankB.qx || 0, targetPlankB.qy || 0, targetPlankB.qz || 0, targetPlankB.qw ?? 1).normalize();
 
-  for (const mPlank of groupAMembers) {
-    mPlank.x = +(mPlank.x + worldShift.x).toFixed(4);
-    mPlank.y = +(mPlank.y + worldShift.y).toFixed(4);
-    mPlank.z = +(mPlank.z + worldShift.z).toFixed(4);
-    mPlank.vx = 0;
-    mPlank.vy = 0;
-    mPlank.vz = 0;
-    mPlank.wx = 0;
-    mPlank.wy = 0;
-    mPlank.wz = 0;
-    mPlank.groupId = newGroupId;
-    spawnOrUpdatePlankMesh(mPlank);
+    const axesB = [
+      new THREE.Vector3(1, 0, 0).applyQuaternion(qB),
+      new THREE.Vector3(0, 1, 0).applyQuaternion(qB),
+      new THREE.Vector3(0, 0, 1).applyQuaternion(qB)
+    ];
+    let bestFaceNormalB = axesB[1].clone();
+    let bestDot = -Infinity;
+    let bFaceIdx = 1;
+    for (let i = 0; i < 3; i++) {
+      for (const s of [-1, 1]) {
+        const cand = axesB[i].clone().multiplyScalar(s);
+        const d = cand.dot(nailNormalWorld);
+        if (d > bestDot) {
+          bestDot = d;
+          bestFaceNormalB = cand;
+          bFaceIdx = i;
+        }
+      }
+    }
+
+    const tiltQuat = new THREE.Quaternion().setFromUnitVectors(nailNormalWorld, bestFaceNormalB);
+    let finalQA = tiltQuat.clone().multiply(qA).normalize();
+
+    const orthoQA = computeSnappedOrthogonalQuaternion(finalQA, qB);
+    const angleToOrtho = 2 * Math.acos(Math.min(1, Math.abs(finalQA.dot(orthoQA))));
+    if (angleToOrtho < 0.16) {
+      finalQA = orthoQA;
+    }
+
+    const deltaQuat = finalQA.clone().multiply(qA.clone().invert()).normalize();
+    const groupAMembers = Object.values(state.planks).filter((p) => (p.groupId || `grp_${p.id}`) === groupAId);
+
+    for (const mp of groupAMembers) {
+      const mq = new THREE.Quaternion(mp.qx || 0, mp.qy || 0, mp.qz || 0, mp.qw ?? 1).normalize();
+      mq.premultiply(deltaQuat).normalize();
+      mp.qx = +mq.x.toFixed(5);
+      mp.qy = +mq.y.toFixed(5);
+      mp.qz = +mq.z.toFixed(5);
+      mp.qw = +mq.w.toFixed(5);
+
+      const rel = new THREE.Vector3(mp.x, mp.y, mp.z).sub(nailWorldPos).applyQuaternion(deltaQuat);
+      mp.x = +(nailWorldPos.x + rel.x).toFixed(4);
+      mp.y = +(nailWorldPos.y + rel.y).toFixed(4);
+      mp.z = +(nailWorldPos.z + rel.z).toFixed(4);
+    }
+
+    const halfB = [(targetPlankB.w || 2.4) / 2, (targetPlankB.h || 0.12) / 2, (targetPlankB.d || 0.36) / 2][bFaceIdx];
+    const axA0 = new THREE.Vector3(1, 0, 0).applyQuaternion(finalQA);
+    const axA1 = new THREE.Vector3(0, 1, 0).applyQuaternion(finalQA);
+    const axA2 = new THREE.Vector3(0, 0, 1).applyQuaternion(finalQA);
+    const halfAlongN =
+      Math.abs(axA0.dot(bestFaceNormalB)) * ((plankA.w || 2.4) / 2) +
+      Math.abs(axA1.dot(bestFaceNormalB)) * ((plankA.h || 0.12) / 2) +
+      Math.abs(axA2.dot(bestFaceNormalB)) * ((plankA.d || 0.36) / 2);
+
+    const cB = new THREE.Vector3(targetPlankB.x, targetPlankB.y, targetPlankB.z);
+    const cA = new THREE.Vector3(plankA.x, plankA.y, plankA.z);
+    const curSignedDist = cA.clone().sub(cB).dot(bestFaceNormalB);
+    const sideSign = curSignedDist >= -0.02 ? 1 : -1;
+    const desiredSignedDist = sideSign * (halfB + halfAlongN);
+    const shiftScalar = desiredSignedDist - curSignedDist;
+
+    if (Math.abs(shiftScalar) < 0.45) {
+      const shiftVec = bestFaceNormalB.clone().multiplyScalar(shiftScalar);
+      for (const mp of groupAMembers) {
+        mp.x = +(mp.x + shiftVec.x).toFixed(4);
+        mp.y = +(mp.y + shiftVec.y).toFixed(4);
+        mp.z = +(mp.z + shiftVec.z).toFixed(4);
+        mp.vx = 0; mp.vy = 0; mp.vz = 0;
+        mp.wx = 0; mp.wy = 0; mp.wz = 0;
+        spawnOrUpdatePlankMesh(mp);
+      }
+    }
   }
 
-  targetPlankB.vx = 0;
-  targetPlankB.vy = 0;
-  targetPlankB.vz = 0;
-  targetPlankB.wx = 0;
-  targetPlankB.wy = 0;
-  targetPlankB.wz = 0;
-  nail.weldedToPlankId = targetPlankB.id;
+  spawnOrUpdatePlankMesh(plankA);
   spawnOrUpdatePlankMesh(targetPlankB);
+  const updMeshA = plankMeshes.get(plankA.id);
+  const updMeshB = plankMeshes.get(targetPlankB.id);
+  updMeshA.updateMatrixWorld(true);
+  updMeshB.updateMatrixWorld(true);
 
-  const syncedGroup = Object.values(state.planks).filter((p) => p.groupId === newGroupId);
-  let maxPen = 0;
-  for (const gp of syncedGroup) {
-    gp.vx = 0;
-    gp.vy = 0;
-    gp.vz = 0;
-    gp.wx = 0;
-    gp.wy = 0;
-    gp.wz = 0;
-    const pts = getPlankGroundPoints(gp);
-    for (const pt of pts) {
-      const pen = getTerrainHeight(pt.x, pt.z) - pt.y;
-      if (pen > maxPen) maxPen = pen;
+  const finalPivotWorld = new THREE.Vector3(nail.lx, nail.ly, nail.lz).applyMatrix4(updMeshA.matrixWorld);
+  const finalAxisWorld = new THREE.Vector3(nail.nx, nail.ny, nail.nz).transformDirection(updMeshA.matrixWorld).normalize();
+  const qBFinal = new THREE.Quaternion(targetPlankB.qx || 0, targetPlankB.qy || 0, targetPlankB.qz || 0, targetPlankB.qw ?? 1).normalize();
+  const invQBFinal = qBFinal.clone().invert();
+  const pivotInB = finalPivotWorld.clone().sub(new THREE.Vector3(targetPlankB.x, targetPlankB.y, targetPlankB.z)).applyQuaternion(invQBFinal);
+  const axisInB = finalAxisWorld.clone().applyQuaternion(invQBFinal).normalize();
+
+  nail.weldedToPlankId = targetPlankB.id;
+  nail.targetLx = +pivotInB.x.toFixed(4);
+  nail.targetLy = +pivotInB.y.toFixed(4);
+  nail.targetLz = +pivotInB.z.toFixed(4);
+  nail.targetNx = +axisInB.x.toFixed(4);
+  nail.targetNy = +axisInB.y.toFixed(4);
+  nail.targetNz = +axisInB.z.toFixed(4);
+
+  recomputePlankGroupsAndJoints();
+
+  const touchedPlanks = Object.values(state.planks).filter(
+    (p) => p.groupId === plankA.groupId || p.groupId === targetPlankB.groupId
+  );
+  for (const tp of touchedPlanks) {
+    if (!tp.isAnchored) {
+      tp.vx = 0; tp.vy = 0; tp.vz = 0;
+      tp.wx = 0; tp.wy = 0; tp.wz = 0;
     }
+    spawnOrUpdatePlankMesh(tp);
   }
-  if (maxPen > 0) {
-    for (const gp of syncedGroup) {
-      gp.y = +(gp.y + maxPen + 0.002).toFixed(4);
-      spawnOrUpdatePlankMesh(gp);
-    }
+  broadcastNetworkPacket({ type: "planks_batch", planks: touchedPlanks }, true);
+
+  if (plankA.groupId === targetPlankB.groupId) {
+    return existingJointNails === 0 && !alreadySameRigidGroup ? "truss" : "rigid";
   }
-  broadcastNetworkPacket({ type: "planks_batch", planks: syncedGroup }, true);
-  return true;
+  return "hinge";
 }
 
 function hammerNailAtCrosshairAction() {
-  const target = findNailForHammer(6.0);
+  const target = findNailForHammer(6.4);
   if (!target) {
     state.workTimer = 0.35;
     playSfx("chop");
-    showToast("🔨 Наведите прицел на гвоздь в доске и нажмите ЛКМ, чтобы забить его глубже!");
+    showToast("🔨 Наведите прицел на гвоздь/анкер: ЛКМ — забить, удержание ПКМ — вытянуть гвоздодёром!");
     return;
   }
   const { plank, nail } = target;
   state.workTimer = 0.38;
   playSfx("chop");
 
-  if (nail.depth >= 1.0) {
-    const welded = checkAndWeldOverlappingPlanksAtNail(plank, nail);
-    if (welded) {
-      playSfx("build");
-      showToast("🔩🔨 Доски выровнены параллельно относительно шляпки гвоздя и намертво склеены!");
+  const finishDrivenNail = () => {
+    if (checkAndAnchorPlankToFoundation(plank, nail)) {
+      playSfx("concrete");
+      showToast("⚓🧱 Анкер забит! Нижний венец намертво притянут к блоку ФБС — основание дома неподвижно (static)!");
       saveWorldPlanks();
-    } else {
-      showToast("✅ Этот гвоздь уже полностью забит в доску!");
+      return;
     }
+    const mode = checkAndWeldOverlappingPlanksAtNail(plank, nail);
+    if (mode === "hinge") {
+      playSfx("build");
+      showToast("🔩🔨 1 гвоздь забит — создан шарнир! Доска проворачивается вокруг гвоздя (2-й гвоздь или укосина зафиксируют намертво).");
+    } else if (mode === "truss") {
+      playSfx("build");
+      showToast("📐🔨 Диагональная укосина замкнула треугольник — узел намертво заблокирован!");
+    } else if (mode === "rigid") {
+      playSfx("build");
+      showToast("🔩🔨 2-й гвоздь забит — вращение заблокировано, создан жёсткий узел!");
+    } else {
+      showToast("🔨 Гвоздь забит до шляпки (100%)!");
+    }
+    saveWorldPlanks();
+  };
+
+  if (nail.depth >= 1.0) {
+    finishDrivenNail();
     return;
   }
 
@@ -2813,24 +3503,145 @@ function hammerNailAtCrosshairAction() {
   spawnOrUpdatePlankMesh(plank);
 
   if (nail.depth >= 1.0) {
-    const welded = checkAndWeldOverlappingPlanksAtNail(plank, nail);
-    if (welded) {
-      playSfx("build");
-      showToast("🔩🔨 Гвоздь забит до конца! Доски стали параллельно друг другу относительно шляпки и склеились!");
-    } else {
-      showToast("🔨 Гвоздь забит до шляпки (100%)!");
-    }
+    finishDrivenNail();
   } else {
-    showToast(`🔨 Гвоздь забит глубже в доску (${Math.round(nail.depth * 100)}%)!`);
+    showToast(`🔨 ${nail.isAnchor ? "Анкер" : "Гвоздь"} забит глубже (${Math.round(nail.depth * 100)}%)!`);
+    saveWorldPlanks();
+    broadcastNetworkPacket({ type: "plank_updated", plank }, true);
   }
-
-  saveWorldPlanks();
-  broadcastNetworkPacket({ type: "plank_updated", plank }, true);
 }
 
-// Распил доски Пилой по точке прицела (отпиливает часть доски, делая её короче)
+// ==========================================
+// ГВОЗДОДЁР (ОБРАТНАЯ СТОРОНА МОЛОТКА — УДЕРЖАНИЕ ПКМ ИЛИ МОБ. КНОПКИ)
+// ==========================================
+const pryState = {
+  active: false,
+  plankId: null,
+  nailId: null,
+  sfxAccum: 0
+};
+let mobSecondaryDown = false;
+
+function stopHammerPry(saveIfPartial = true) {
+  if (!pryState.active) return;
+  const p = state.planks[pryState.plankId];
+  pryState.active = false;
+  pryState.plankId = null;
+  pryState.nailId = null;
+  const pill = document.getElementById("pry-progress-pill");
+  if (pill) pill.style.display = "none";
+  if (saveIfPartial && p) {
+    recomputePlankGroupsAndJoints();
+    spawnOrUpdatePlankMesh(p);
+    saveWorldPlanks();
+    broadcastNetworkPacket({ type: "plank_updated", plank: p }, true);
+  }
+}
+
+function updateHammerPry(dt) {
+  const wantPry =
+    state.started &&
+    modalBackdrop.style.display !== "flex" &&
+    !grabState.active &&
+    state.heldItem === "hammer" &&
+    (rightMouseDown || mobSecondaryDown);
+
+  if (!wantPry) {
+    if (pryState.active) stopHammerPry(true);
+    return;
+  }
+
+  let plank = pryState.plankId ? state.planks[pryState.plankId] : null;
+  let nail = plank && Array.isArray(plank.nails) ? plank.nails.find((n) => n.id === pryState.nailId) : null;
+
+  if (!plank || !nail) {
+    const found = findNailForHammer(6.4);
+    if (!found) {
+      if (pryState.active) stopHammerPry(true);
+      return;
+    }
+    plank = found.plank;
+    nail = found.nail;
+    pryState.active = true;
+    pryState.plankId = plank.id;
+    pryState.nailId = nail.id;
+    pryState.sfxAccum = 0.2;
+  } else {
+    const mg = plankMeshes.get(plank.id);
+    if (mg) {
+      mg.updateMatrixWorld(true);
+      const nw = new THREE.Vector3(nail.lx, nail.ly, nail.lz).applyMatrix4(mg.matrixWorld);
+      const camPos = new THREE.Vector3();
+      const camDir = new THREE.Vector3();
+      camera.getWorldPosition(camPos);
+      camera.getWorldDirection(camDir);
+      const toNail = nw.clone().sub(camPos);
+      const dist = toNail.length();
+      const perp = toNail.sub(camDir.multiplyScalar(toNail.dot(camDir))).length();
+      if (dist > 6.5 || perp > 0.95) {
+        stopHammerPry(true);
+        return;
+      }
+    }
+  }
+
+  const wasWeldedOrAnchored = Boolean(nail.weldedToPlankId || nail.anchoredToBlockId);
+  const wasAnchor = Boolean(nail.isAnchor || nail.anchoredToBlockId);
+
+  nail.depth = +Math.max(0, (nail.depth ?? 0.25) - dt * 1.08).toFixed(3);
+  state.workTimer = 0.18;
+
+  pryState.sfxAccum += dt;
+  if (pryState.sfxAccum >= 0.17) {
+    pryState.sfxAccum = 0;
+    playSfx("pry");
+  }
+
+  if (wasWeldedOrAnchored && nail.depth < 0.92) {
+    nail.weldedToPlankId = null;
+    nail.anchoredToBlockId = null;
+    recomputePlankGroupsAndJoints();
+  }
+
+  const pctExtracted = Math.min(100, Math.max(0, Math.round((1 - nail.depth) * 100)));
+  const pill = document.getElementById("pry-progress-pill");
+  const lbl = document.getElementById("pry-progress-label");
+  const fill = document.getElementById("pry-bar-fill");
+  if (pill && lbl && fill) {
+    pill.style.display = "block";
+    lbl.textContent = wasAnchor
+      ? `⚓ Гвоздодёр: вытягиваем анкер... ${pctExtracted}%`
+      : `🔧 Гвоздодёр: вытягиваем гвоздь... ${pctExtracted}%`;
+    fill.style.width = `${pctExtracted}%`;
+  }
+
+  if (nail.depth <= 0.06) {
+    plank.nails = plank.nails.filter((n) => n.id !== nail.id);
+    state.inv.nails = (state.inv.nails || 0) + 1;
+    pryState.active = false;
+    pryState.plankId = null;
+    pryState.nailId = null;
+    if (pill) pill.style.display = "none";
+
+    recomputePlankGroupsAndJoints();
+    spawnOrUpdatePlankMesh(plank);
+    playSfx("pick");
+    showToast(
+      wasAnchor
+        ? "⚓🔧 Анкер вытянут гвоздодёром (+1 крепёж сохранён в инвентарь)!"
+        : "🔩🔧 Гвоздь вытянут гвоздодёром (+1 гвоздь сохранён, доска цела)!"
+    );
+    saveWorldPlanks();
+    saveLocalProfile();
+    updateHudUI();
+    broadcastNetworkPacket({ type: "plank_updated", plank }, true);
+  } else {
+    spawnOrUpdatePlankMesh(plank);
+  }
+}
+
 function sawPlankAtCrosshairAction() {
-  const surf = raycastPlankSurface(5.8);
+  const surf = raycastPlankSurface(6.2);
   if (!surf || !surf.plank) {
     state.workTimer = 0.25;
     showToast("🪚 Наведите прицел на доску и нажмите ЛКМ, чтобы отпилить часть!");
@@ -2859,32 +3670,23 @@ function sawPlankAtCrosshairAction() {
   const origCenter = new THREE.Vector3(plank.x, plank.y, plank.z);
   const origNails = Array.isArray(plank.nails) ? plank.nails : [];
 
-  // Определяем основную (бОльшую) часть и отпиленный кусок
   const keepLeft = leftLen >= rightLen;
   const mainLen = +(keepLeft ? leftLen : rightLen).toFixed(3);
   const offLen = +(keepLeft ? rightLen : leftLen).toFixed(3);
 
-  // Локальные центры обеих половин вдоль оси X исходной доски
   const leftCenterOffset = -halfW + leftLen * 0.5;
   const rightCenterOffset = halfW - rightLen * 0.5;
   const mainOffset = keepLeft ? leftCenterOffset : rightCenterOffset;
-  const offOffset = keepLeft ? rightCenterOffset : leftCenterOffset;
 
   const mainPos = origCenter.clone().addScaledVector(localAxisX, mainOffset);
   plank.w = mainLen;
   plank.x = +mainPos.x.toFixed(4);
   plank.y = +mainPos.y.toFixed(4);
   plank.z = +mainPos.z.toFixed(4);
-  plank.vx = 0;
-  plank.vy = 0;
-  plank.vz = 0;
-  plank.wx = 0;
-  plank.wy = 0;
-  plank.wz = 0;
+  plank.vx = 0; plank.vy = 0; plank.vz = 0;
+  plank.wx = 0; plank.wy = 0; plank.wz = 0;
 
-  // Пересчитываем координаты гвоздей, оставшихся на основной части
   const mainNails = [];
-  const offNails = [];
   for (const nl of origNails) {
     const inLeft = (nl.lx || 0) <= cutX;
     if ((keepLeft && inLeft) || (!keepLeft && !inLeft)) {
@@ -2892,15 +3694,10 @@ function sawPlankAtCrosshairAction() {
         ...nl,
         lx: +((nl.lx || 0) - mainOffset).toFixed(4)
       });
-    } else {
-      offNails.push({
-        ...nl,
-        lx: +((nl.lx || 0) - offOffset).toFixed(4),
-        weldedToPlankId: null
-      });
     }
   }
   plank.nails = mainNails;
+  recomputePlankGroupsAndJoints();
   spawnOrUpdatePlankMesh(plank);
 
   state.workTimer = 0.38;
@@ -2910,12 +3707,12 @@ function sawPlankAtCrosshairAction() {
   broadcastNetworkPacket({ type: "plank_updated", plank }, true);
 }
 
-// Проверка попадания досок внутрь мусорного контейнера перед СНТ (авто-удаление ненужных досок)
 function checkDumpsterPlankDisposal() {
   if (loadedChunks.size === 0) return;
   const toDeleteIds = new Set();
 
   for (const pl of Object.values(state.planks)) {
+    if (pl.isAnchored) continue;
     for (const ch of loadedChunks.values()) {
       const dp = ch.layout.dumpsterPos;
       if (!dp) continue;
@@ -2924,10 +3721,9 @@ function checkDumpsterPlankDisposal() {
       if (dx < 1.62 && dz < 1.08) {
         const dumpY = getTerrainHeight(dp.x, dp.z);
         if (pl.y >= dumpY - 0.3 && pl.y <= dumpY + 2.15) {
-          // Если доска входила в схваченную группу — удаляем всю принесённую конструкцию/доску
           const gid = pl.groupId || `grp_${pl.id}`;
           for (const member of Object.values(state.planks)) {
-            if ((member.groupId || `grp_${member.id}`) === gid) {
+            if ((member.groupId || `grp_${member.id}`) === gid && !member.isAnchored) {
               toDeleteIds.add(member.id);
             }
           }
@@ -2943,6 +3739,7 @@ function checkDumpsterPlankDisposal() {
           grabState.active = false;
           grabState.groupId = null;
           grabState.members = [];
+          grabState.fixedHinge = null;
           break;
         }
       }
@@ -2960,7 +3757,7 @@ function checkDumpsterPlankDisposal() {
 }
 
 // ==========================================
-// ЗАХВАТ И ВРАЩЕНИЕ ДОСОК ПУСТОЙ РУКОЙ (УДЕРЖАНИЕ ЛКМ + Q/E/R + ДВИЖЕНИЕ МЫШЬЮ)
+// ЗАХВАТ И ВРАЩЕНИЕ ДОСОК ПУСТОЙ РУКОЙ (ВКЛЮЧАЯ ПОВОРОТ НА 1-ГВОЗДЕВОМ ШАРНИРЕ!)
 // ==========================================
 const grabState = {
   active: false,
@@ -2968,6 +3765,7 @@ const grabState = {
   distance: 3.2,
   pivotPos: new THREE.Vector3(),
   deltaRot: new THREE.Quaternion(),
+  fixedHinge: null,
   members: []
 };
 let leftMouseDown = false;
@@ -2978,12 +3776,13 @@ const WORLD_UP = new THREE.Vector3(0, 1, 0);
 function isGrabMouseRotateMode() {
   return (
     grabState.active &&
+    !grabState.fixedHinge &&
     (rightMouseDown || Boolean(keys["KeyR"] || keys["KeyE"] || keys["KeyQ"]))
   );
 }
 
 function applyGrabMouseRotation(dx, dy, sens) {
-  if (!grabState.active) return;
+  if (!grabState.active || grabState.fixedHinge) return;
   const holdR = Boolean(keys["KeyR"]);
   const holdE = Boolean(keys["KeyE"]);
   const holdQ = Boolean(keys["KeyQ"]);
@@ -3041,20 +3840,58 @@ function tryStartHandGrab() {
   if (!surf) return false;
 
   const hitPlank = surf.plank;
+  if (hitPlank.isAnchored) {
+    showToast("⚓ Основание намертво закреплено анкерами на фундаменте! Чтобы снять — вытяните анкер гвоздодёром [ПКМ молотком].");
+    return false;
+  }
+
   const grpId = hitPlank.groupId || `grp_${hitPlank.id}`;
   hitPlank.groupId = grpId;
   const members = Object.values(state.planks).filter((p) => (p.groupId || `grp_${p.id}`) === grpId);
   if (members.length === 0) return false;
 
+  let fixedHinge = null;
+  for (const h of activePlankHinges) {
+    const aIsOurs = h.plA.groupId === grpId;
+    const bIsOurs = h.plB.groupId === grpId;
+    if (aIsOurs || bIsOurs) {
+      const otherPlank = aIsOurs ? h.plB : h.plA;
+      const qOther = new THREE.Quaternion(otherPlank.qx || 0, otherPlank.qy || 0, otherPlank.qz || 0, otherPlank.qw ?? 1).normalize();
+      const cOther = new THREE.Vector3(otherPlank.x, otherPlank.y, otherPlank.z);
+      const pivotWorld = aIsOurs
+        ? new THREE.Vector3(h.nail.targetLx, h.nail.targetLy, h.nail.targetLz).applyQuaternion(qOther).add(cOther)
+        : new THREE.Vector3(h.nail.lx, h.nail.ly, h.nail.lz).applyQuaternion(qOther).add(cOther);
+      const axisWorld = aIsOurs
+        ? new THREE.Vector3(h.nail.targetNx, h.nail.targetNy, h.nail.targetNz).applyQuaternion(qOther).normalize()
+        : new THREE.Vector3(h.nail.nx, h.nail.ny, h.nail.nz).applyQuaternion(qOther).normalize();
+
+      const grabOffset = surf.point.clone().sub(pivotWorld);
+      grabOffset.addScaledVector(axisWorld, -grabOffset.dot(axisWorld));
+      if (grabOffset.lengthSq() > 0.02 * 0.02) {
+        fixedHinge = {
+          pivotWorld,
+          axisWorld,
+          initArmDir: grabOffset.normalize()
+        };
+        break;
+      }
+    }
+  }
+
   const center = new THREE.Vector3();
-  for (const p of members) center.add(new THREE.Vector3(p.x, p.y, p.z));
-  center.divideScalar(members.length);
+  if (fixedHinge) {
+    center.copy(fixedHinge.pivotWorld);
+  } else {
+    for (const p of members) center.add(new THREE.Vector3(p.x, p.y, p.z));
+    center.divideScalar(members.length);
+  }
 
   grabState.active = true;
   grabState.groupId = grpId;
   grabState.distance = Math.max(1.8, Math.min(6.2, surf.distance));
   grabState.pivotPos.copy(center);
   grabState.deltaRot.identity();
+  grabState.fixedHinge = fixedHinge;
   grabState.members = members.map((p) => ({
     id: p.id,
     relPos: new THREE.Vector3(p.x, p.y, p.z).sub(center),
@@ -3070,70 +3907,85 @@ function updateHandGrab(dt) {
     return;
   }
 
-  // На ПК удержание Q / E / R НЕ крутит доску само — вращение происходит только движением мыши (applyGrabMouseRotation).
-  // Отдельные экранные кнопки на телефонах (mobGrabSpin) вращают плавно при удержании пальцем:
-  if (mobGrabSpin.y || mobGrabSpin.x || mobGrabSpin.z) {
-    const rotSpeed = 1.85 * dt;
-    const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
-    camRight.y = 0;
-    if (camRight.lengthSq() > 1e-4) camRight.normalize();
-    else camRight.set(1, 0, 0);
-    const camFwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-    camFwd.y = 0;
-    if (camFwd.lengthSq() > 1e-4) camFwd.normalize();
-    else camFwd.set(0, 0, -1);
-
-    if (mobGrabSpin.y) {
-      const qYaw = new THREE.Quaternion().setFromAxisAngle(WORLD_UP, rotSpeed);
-      grabState.deltaRot.premultiply(qYaw).normalize();
-    }
-    if (mobGrabSpin.x) {
-      const qPitch = new THREE.Quaternion().setFromAxisAngle(camRight, rotSpeed);
-      grabState.deltaRot.premultiply(qPitch).normalize();
-    }
-    if (mobGrabSpin.z) {
-      const qRoll = new THREE.Quaternion().setFromAxisAngle(camFwd, rotSpeed);
-      grabState.deltaRot.premultiply(qRoll).normalize();
-    }
-  }
-
   const camPos = new THREE.Vector3();
   const camDir = new THREE.Vector3();
   camera.getWorldPosition(camPos);
   camera.getWorldDirection(camDir);
 
-  const targetCenter = camPos.addScaledVector(camDir, grabState.distance);
+  let targetCenter;
 
-  // Не даём опустить конструкцию или её углы под землю
-  let minLift = 0;
-  for (const m of grabState.members) {
-    const pl = state.planks[m.id];
-    if (!pl) continue;
-    const newPos = targetCenter.clone().add(m.relPos.clone().applyQuaternion(grabState.deltaRot));
-    const newQuat = grabState.deltaRot.clone().multiply(m.initQuat).normalize();
-    const u0 = new THREE.Vector3(1, 0, 0).applyQuaternion(newQuat);
-    const u1 = new THREE.Vector3(0, 1, 0).applyQuaternion(newQuat);
-    const u2 = new THREE.Vector3(0, 0, 1).applyQuaternion(newQuat);
-    const e0 = (pl.w || 2.4) / 2;
-    const e1 = (pl.h || 0.12) / 2;
-    const e2 = (pl.d || 0.36) / 2;
-    for (const sx of [-1, 1]) {
-      for (const sy of [-1, 1]) {
-        for (const sz of [-1, 1]) {
-          const corner = newPos
-            .clone()
-            .addScaledVector(u0, sx * e0)
-            .addScaledVector(u1, sy * e1)
-            .addScaledVector(u2, sz * e2);
-          const gY = getTerrainHeight(corner.x, corner.z) + 0.01;
-          if (corner.y < gY) {
-            minLift = Math.max(minLift, gY - corner.y);
+  if (grabState.fixedHinge) {
+    const { pivotWorld, axisWorld, initArmDir } = grabState.fixedHinge;
+    const aimPt = camPos.clone().addScaledVector(camDir, grabState.distance);
+    const curVec = aimPt.sub(pivotWorld);
+    curVec.addScaledVector(axisWorld, -curVec.dot(axisWorld));
+    if (curVec.lengthSq() > 0.02 * 0.02) {
+      curVec.normalize();
+      const cross = new THREE.Vector3().crossVectors(initArmDir, curVec);
+      const sinA = cross.dot(axisWorld);
+      const cosA = Math.max(-1, Math.min(1, initArmDir.dot(curVec)));
+      const angle = Math.atan2(sinA, cosA);
+      grabState.deltaRot.setFromAxisAngle(axisWorld, angle);
+    }
+    targetCenter = pivotWorld.clone();
+  } else {
+    if (mobGrabSpin.y || mobGrabSpin.x || mobGrabSpin.z) {
+      const rotSpeed = 1.85 * dt;
+      const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+      camRight.y = 0;
+      if (camRight.lengthSq() > 1e-4) camRight.normalize();
+      else camRight.set(1, 0, 0);
+      const camFwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+      camFwd.y = 0;
+      if (camFwd.lengthSq() > 1e-4) camFwd.normalize();
+      else camFwd.set(0, 0, -1);
+
+      if (mobGrabSpin.y) {
+        const qYaw = new THREE.Quaternion().setFromAxisAngle(WORLD_UP, rotSpeed);
+        grabState.deltaRot.premultiply(qYaw).normalize();
+      }
+      if (mobGrabSpin.x) {
+        const qPitch = new THREE.Quaternion().setFromAxisAngle(camRight, rotSpeed);
+        grabState.deltaRot.premultiply(qPitch).normalize();
+      }
+      if (mobGrabSpin.z) {
+        const qRoll = new THREE.Quaternion().setFromAxisAngle(camFwd, rotSpeed);
+        grabState.deltaRot.premultiply(qRoll).normalize();
+      }
+    }
+
+    targetCenter = camPos.addScaledVector(camDir, grabState.distance);
+
+    let minLift = 0;
+    for (const m of grabState.members) {
+      const pl = state.planks[m.id];
+      if (!pl) continue;
+      const newPos = targetCenter.clone().add(m.relPos.clone().applyQuaternion(grabState.deltaRot));
+      const newQuat = grabState.deltaRot.clone().multiply(m.initQuat).normalize();
+      const u0 = new THREE.Vector3(1, 0, 0).applyQuaternion(newQuat);
+      const u1 = new THREE.Vector3(0, 1, 0).applyQuaternion(newQuat);
+      const u2 = new THREE.Vector3(0, 0, 1).applyQuaternion(newQuat);
+      const e0 = (pl.w || 2.4) / 2;
+      const e1 = (pl.h || 0.12) / 2;
+      const e2 = (pl.d || 0.36) / 2;
+      for (const sx of [-1, 1]) {
+        for (const sy of [-1, 1]) {
+          for (const sz of [-1, 1]) {
+            const corner = newPos
+              .clone()
+              .addScaledVector(u0, sx * e0)
+              .addScaledVector(u1, sy * e1)
+              .addScaledVector(u2, sz * e2);
+            const gY = getTerrainHeight(corner.x, corner.z) + 0.01;
+            if (corner.y < gY) {
+              minLift = Math.max(minLift, gY - corner.y);
+            }
           }
         }
       }
     }
+    targetCenter.y += minLift;
   }
-  targetCenter.y += minLift;
 
   for (const m of grabState.members) {
     const pl = state.planks[m.id];
@@ -3150,9 +4002,13 @@ function updateHandGrab(dt) {
     pl.qy = +newQuat.y.toFixed(5);
     pl.qz = +newQuat.z.toFixed(5);
     pl.qw = +newQuat.w.toFixed(5);
-    pl.vx = Math.max(-8, Math.min(8, +(((pl.x - prevX) / Math.max(0.01, dt)) * 0.35).toFixed(3)));
-    pl.vy = Math.max(-8, Math.min(8, +(((pl.y - prevY) / Math.max(0.01, dt)) * 0.35).toFixed(3)));
-    pl.vz = Math.max(-8, Math.min(8, +(((pl.z - prevZ) / Math.max(0.01, dt)) * 0.35).toFixed(3)));
+    if (grabState.fixedHinge) {
+      pl.vx = 0; pl.vy = 0; pl.vz = 0;
+    } else {
+      pl.vx = Math.max(-8, Math.min(8, +(((pl.x - prevX) / Math.max(0.01, dt)) * 0.35).toFixed(3)));
+      pl.vy = Math.max(-8, Math.min(8, +(((pl.y - prevY) / Math.max(0.01, dt)) * 0.35).toFixed(3)));
+      pl.vz = Math.max(-8, Math.min(8, +(((pl.z - prevZ) / Math.max(0.01, dt)) * 0.35).toFixed(3)));
+    }
     pl.wx = 0;
     pl.wy = 0;
     pl.wz = 0;
@@ -3179,8 +4035,8 @@ function endHandGrab() {
   const grpId = grabState.groupId;
   grabState.active = false;
   grabState.groupId = null;
+  grabState.fixedHinge = null;
   const updated = Object.values(state.planks).filter((p) => p.groupId === grpId);
-  // Гасим мелкую случайную инерцию при аккуратной укладке доски, сохраняя возможность сильного броска
   for (const p of updated) {
     if (Math.hypot(p.vx || 0, p.vz || 0) < 1.1) {
       p.vx = 0;
@@ -3198,7 +4054,7 @@ function endHandGrab() {
 }
 
 // ==========================================
-// РЕАЛИСТИЧНАЯ 3D-ФИЗИКА ДОСОК (ТОЧНЫЙ OBB-КЛИППИНГ, СУХОЕ ТРЕНИЕ И УСТОЙЧИВЫЕ СТОПКИ БЕЗ СЪЕЗЖАНИЯ)
+// РЕАЛИСТИЧНАЯ 3D-ФИЗИКА ДОСОК, БЛОКОВ ФБС И 1-ГВОЗДЕВЫХ ШАРНИРОВ
 // ==========================================
 function getPlankGroundPoints(pl) {
   const q = new THREE.Quaternion(pl.qx || 0, pl.qy || 0, pl.qz || 0, pl.qw ?? 1).normalize();
@@ -3276,6 +4132,30 @@ function buildPlankOBB(pl, extraHalf = 0) {
     minY: center.y - ry, maxY: center.y + ry,
     minZ: center.z - rz, maxZ: center.z + rz
   };
+}
+
+function buildFoundationBlockOBB(f, extraHalf = 0) {
+  const gY = typeof f.groundY === "number" ? f.groundY : getTerrainHeight(f.x, f.z);
+  const bottomY = gY - 0.38;
+  const topY = typeof f.topY === "number" ? f.topY : gY + 0.28;
+  const h = Math.max(0.2, topY - bottomY);
+  const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, f.yaw || 0, 0, "YXZ"));
+  return buildPlankOBB(
+    {
+      id: f.id,
+      w: f.w || 0.64,
+      h,
+      d: f.d || 0.64,
+      x: f.x,
+      y: bottomY + h * 0.5,
+      z: f.z,
+      qx: q.x,
+      qy: q.y,
+      qz: q.z,
+      qw: q.w
+    },
+    extraHalf
+  );
 }
 
 function projectOBBOnAxis(obb, axX, axY, axZ) {
@@ -3360,30 +4240,20 @@ function reduceManifoldPoints(rawPts, normal) {
 
   let cx = 0, cy = 0, cz = 0;
   for (const p of unique) {
-    cx += p.x;
-    cy += p.y;
-    cz += p.z;
+    cx += p.x; cy += p.y; cz += p.z;
   }
-  cx /= unique.length;
-  cy /= unique.length;
-  cz /= unique.length;
+  cx /= unique.length; cy /= unique.length; cz /= unique.length;
 
   let i0 = 0, bestD0 = -1;
   for (let i = 0; i < unique.length; i++) {
     const p = unique[i];
     const d = (p.x - cx) ** 2 + (p.y - cy) ** 2 + (p.z - cz) ** 2;
-    if (d > bestD0) {
-      bestD0 = d;
-      i0 = i;
-    }
+    if (d > bestD0) { bestD0 = d; i0 = i; }
   }
   let i1 = i0, bestD1 = -1;
   for (let i = 0; i < unique.length; i++) {
     const d = unique[i].distanceToSquared(unique[i0]);
-    if (d > bestD1) {
-      bestD1 = d;
-      i1 = i;
-    }
+    if (d > bestD1) { bestD1 = d; i1 = i; }
   }
   if (i1 === i0) return [unique[i0]];
 
@@ -3396,14 +4266,8 @@ function reduceManifoldPoints(rawPts, normal) {
   for (let i = 0; i < unique.length; i++) {
     if (i === i0 || i === i1) continue;
     const area = (unique[i].dot(t1) - u0) * dv - (unique[i].dot(t2) - v0) * du;
-    if (area > maxPos) {
-      maxPos = area;
-      i2 = i;
-    }
-    if (area < minNeg) {
-      minNeg = area;
-      i3 = i;
-    }
+    if (area > maxPos) { maxPos = area; i2 = i; }
+    if (area < minNeg) { minNeg = area; i3 = i; }
   }
   const out = [p0, p1];
   if (i2 !== -1) out.push(unique[i2]);
@@ -3473,9 +4337,7 @@ function testOBBCollision(obbA, obbB, clipMargin = 0.003) {
   }
 
   if (diffX * bestX + diffY * bestY + diffZ * bestZ < 0) {
-    bestX = -bestX;
-    bestY = -bestY;
-    bestZ = -bestZ;
+    bestX = -bestX; bestY = -bestY; bestZ = -bestZ;
   }
   const bestAxis = new THREE.Vector3(bestX, bestY, bestZ);
 
@@ -3498,12 +4360,7 @@ function testOBBCollision(obbA, obbB, clipMargin = 0.003) {
     points = [contactPoint.clone()];
   }
 
-  return {
-    normal: bestAxis,
-    depth: minOverlap,
-    point: contactPoint,
-    points
-  };
+  return { normal: bestAxis, depth: minOverlap, point: contactPoint, points };
 }
 
 function buildConvexHullXZ(pts2d) {
@@ -3589,6 +4446,7 @@ function isComInsideSupportHullXZ(comX, comZ, pts2d, margin = 0.035) {
 }
 
 function applyBodyRotationDelta(body, angDelta) {
+  if (body.invInertia <= 0) return;
   const len = angDelta.length();
   if (len < 1e-6) return;
   const maxStep = 0.25;
@@ -3614,6 +4472,7 @@ function applyBodyRotationDelta(body, angDelta) {
 }
 
 function translateBody(body, delta) {
+  if (body.invMass <= 0) return;
   if (Math.abs(delta.x) < 1e-9 && Math.abs(delta.y) < 1e-9 && Math.abs(delta.z) < 1e-9) return;
   body.com.add(delta);
   for (const pl of body.members) {
@@ -3625,6 +4484,7 @@ function translateBody(body, delta) {
 }
 
 function solveGroundPositionForBody(body) {
+  if (body.invMass <= 0) return;
   for (let posIter = 0; posIter < 4; posIter++) {
     const linCorr = new THREE.Vector3();
     const angCorr = new THREE.Vector3();
@@ -3671,6 +4531,105 @@ function solveGroundPositionForBody(body) {
   body.groundSupportPts = groundPts;
 }
 
+function solveHingeJointsPass(bodies, subDt) {
+  if (activePlankHinges.length === 0) return;
+
+  for (let iter = 0; iter < 5; iter++) {
+    for (const h of activePlankHinges) {
+      const { plA, plB, nail } = h;
+      const bodyA = bodies.get(plA.groupId);
+      const bodyB = bodies.get(plB.groupId);
+      if (!bodyA || !bodyB || bodyA === bodyB) continue;
+      if (bodyA.isFarInactive && bodyB.isFarInactive) continue;
+
+      const invMA = bodyA.invMass;
+      const invMB = bodyB.invMass;
+      const invIA = bodyA.invInertia;
+      const invIB = bodyB.invInertia;
+      if (invMA + invMB + invIA + invIB <= 0) continue;
+
+      const qA = new THREE.Quaternion(plA.qx || 0, plA.qy || 0, plA.qz || 0, plA.qw ?? 1).normalize();
+      const qB = new THREE.Quaternion(plB.qx || 0, plB.qy || 0, plB.qz || 0, plB.qw ?? 1).normalize();
+
+      const axisA = new THREE.Vector3(nail.nx ?? 0, nail.ny ?? 1, nail.nz ?? 0).applyQuaternion(qA).normalize();
+      const axisB = new THREE.Vector3(nail.targetNx ?? 0, nail.targetNy ?? 1, nail.targetNz ?? 0).applyQuaternion(qB).normalize();
+
+      const axisErr = new THREE.Vector3().crossVectors(axisA, axisB);
+      const invISum = invIA + invIB;
+      if (axisErr.lengthSq() > 1e-8 && invISum > 0) {
+        const angImp = axisErr.multiplyScalar(0.82 / invISum);
+        if (invIA > 0) applyBodyRotationDelta(bodyA, angImp.clone().multiplyScalar(invIA));
+        if (invIB > 0) applyBodyRotationDelta(bodyB, angImp.clone().multiplyScalar(-invIB));
+      }
+
+      if (invISum > 0) {
+        const sharedAxis = axisA.clone().add(axisB);
+        if (sharedAxis.lengthSq() > 1e-6) sharedAxis.normalize();
+        else sharedAxis.copy(axisA);
+
+        const relW = bodyA.angVel.clone().sub(bodyB.angVel);
+        const spinAlongNail = relW.dot(sharedAxis);
+        const swingW = relW.clone().addScaledVector(sharedAxis, -spinAlongNail);
+        const swingImp = swingW.multiplyScalar(-0.88 / invISum);
+        if (invIA > 0) bodyA.angVel.addScaledVector(swingImp, invIA);
+        if (invIB > 0) bodyB.angVel.addScaledVector(swingImp, -invIB);
+
+        if (iter === 0) {
+          const spinFrictionImp = sharedAxis.multiplyScalar((-spinAlongNail * Math.min(0.35, 2.2 * subDt)) / invISum);
+          if (invIA > 0) bodyA.angVel.addScaledVector(spinFrictionImp, invIA);
+          if (invIB > 0) bodyB.angVel.addScaledVector(spinFrictionImp, -invIB);
+        }
+      }
+
+      const qA2 = new THREE.Quaternion(plA.qx || 0, plA.qy || 0, plA.qz || 0, plA.qw ?? 1).normalize();
+      const qB2 = new THREE.Quaternion(plB.qx || 0, plB.qy || 0, plB.qz || 0, plB.qw ?? 1).normalize();
+      const pA = new THREE.Vector3(nail.lx || 0, nail.ly || 0, nail.lz || 0)
+        .applyQuaternion(qA2)
+        .add(new THREE.Vector3(plA.x, plA.y, plA.z));
+      const pB = new THREE.Vector3(nail.targetLx || 0, nail.targetLy || 0, nail.targetLz || 0)
+        .applyQuaternion(qB2)
+        .add(new THREE.Vector3(plB.x, plB.y, plB.z));
+
+      const rA = pA.clone().sub(bodyA.com);
+      const rB = pB.clone().sub(bodyB.com);
+
+      const vPA = bodyA.vel.clone().add(new THREE.Vector3().crossVectors(bodyA.angVel, rA));
+      const vPB = bodyB.vel.clone().add(new THREE.Vector3().crossVectors(bodyB.angVel, rB));
+      const relV = vPA.sub(vPB);
+      const relVLen = relV.length();
+      if (relVLen > 1e-5) {
+        const dirV = relV.clone().multiplyScalar(1 / relVLen);
+        const rAxDir = new THREE.Vector3().crossVectors(rA, dirV);
+        const rBxDir = new THREE.Vector3().crossVectors(rB, dirV);
+        const kVel = invMA + invMB + rAxDir.lengthSq() * invIA + rBxDir.lengthSq() * invIB;
+        if (kVel > 1e-8) {
+          const jVel = dirV.multiplyScalar((-relVLen * 0.85) / kVel);
+          if (invMA > 0) bodyA.vel.addScaledVector(jVel, invMA);
+          if (invIA > 0) bodyA.angVel.addScaledVector(new THREE.Vector3().crossVectors(rA, jVel), invIA);
+          if (invMB > 0) bodyB.vel.addScaledVector(jVel, -invMB);
+          if (invIB > 0) bodyB.angVel.addScaledVector(new THREE.Vector3().crossVectors(rB, jVel), -invIB);
+        }
+      }
+
+      const posErr = pB.sub(pA);
+      const errLen = posErr.length();
+      if (errLen > 0.0002) {
+        const dirP = posErr.clone().multiplyScalar(1 / errLen);
+        const rAxP = new THREE.Vector3().crossVectors(rA, dirP);
+        const rBxP = new THREE.Vector3().crossVectors(rB, dirP);
+        const kPos = invMA + invMB + rAxP.lengthSq() * invIA + rBxP.lengthSq() * invIB;
+        if (kPos > 1e-8) {
+          const jPos = dirP.multiplyScalar((errLen * 0.82) / kPos);
+          if (invMA > 0) translateBody(bodyA, jPos.clone().multiplyScalar(invMA));
+          if (invIA > 0) applyBodyRotationDelta(bodyA, new THREE.Vector3().crossVectors(rA, jPos).multiplyScalar(invIA));
+          if (invMB > 0) translateBody(bodyB, jPos.clone().multiplyScalar(-invMB));
+          if (invIB > 0) applyBodyRotationDelta(bodyB, new THREE.Vector3().crossVectors(rB, jPos).multiplyScalar(-invIB));
+        }
+      }
+    }
+  }
+}
+
 let physicsSaveTimer = 0;
 
 function stepPlanksPhysics(dt) {
@@ -3681,7 +4640,6 @@ function stepPlanksPhysics(dt) {
   const subSteps = 4;
   const subDt = simDt / subSteps;
 
-  // 1. Формируем твёрдые тела (Rigid Bodies) по группам склеенных досок
   const groupMap = new Map();
   for (const pl of plankList) {
     const gid = pl.groupId || `grp_${pl.id}`;
@@ -3693,6 +4651,9 @@ function stepPlanksPhysics(dt) {
   const bodies = new Map();
   for (const [gid, members] of groupMap.entries()) {
     const isGrabbed = grabState.active && grabState.groupId === gid;
+    const isAnchored = members.some((m) => Boolean(m.isAnchored));
+    const isStatic = isGrabbed || isAnchored;
+
     const com = new THREE.Vector3();
     const vel = new THREE.Vector3();
     const angVel = new THREE.Vector3();
@@ -3702,11 +4663,16 @@ function stepPlanksPhysics(dt) {
       angVel.add(new THREE.Vector3(pl.wx || 0, pl.wy || 0, pl.wz || 0));
     }
     com.divideScalar(members.length);
-    vel.divideScalar(members.length);
-    angVel.divideScalar(members.length);
+    if (isStatic) {
+      vel.set(0, 0, 0);
+      angVel.set(0, 0, 0);
+    } else {
+      vel.divideScalar(members.length);
+      angVel.divideScalar(members.length);
+    }
 
     const mass = members.length * 1.0;
-    const invMass = isGrabbed ? 0 : 1.0 / mass;
+    const invMass = isStatic ? 0 : 1.0 / mass;
 
     let totalInertia = 0;
     for (const pl of members) {
@@ -3717,7 +4683,7 @@ function stepPlanksPhysics(dt) {
       const distSq = new THREE.Vector3(pl.x, pl.y, pl.z).sub(com).lengthSq();
       totalInertia += ownInertia + distSq;
     }
-    const invInertia = isGrabbed ? 0 : 1.0 / Math.max(0.45, totalInertia);
+    const invInertia = isStatic ? 0 : 1.0 / Math.max(0.45, totalInertia);
 
     const distSqToPlayer = state.started
       ? (com.x - state.x) * (com.x - state.x) + (com.z - state.z) * (com.z - state.z)
@@ -3728,10 +4694,12 @@ function stepPlanksPhysics(dt) {
       gid,
       members,
       isGrabbed,
+      isAnchored,
+      isStatic,
       isFarInactive,
-      touchingGround: false,
+      touchingGround: isAnchored,
       groundSupportPts: [],
-      verticallySupported: isGrabbed,
+      verticallySupported: isStatic,
       obbDirty: true,
       com,
       vel,
@@ -3750,6 +4718,21 @@ function stepPlanksPhysics(dt) {
       const dx = pl.x - state.x;
       const dz = pl.z - state.z;
       m.visible = dx * dx + dz * dz < 165 * 165;
+    }
+  }
+
+  const nearbyFoundationOBBs = [];
+  for (const f of Object.values(state.foundations)) {
+    const fm = foundationMeshes.get(f.id);
+    if (fm && state.started) {
+      const dx = f.x - state.x;
+      const dz = f.z - state.z;
+      fm.visible = dx * dx + dz * dz < 165 * 165;
+    }
+    if (f.stage !== "block") continue;
+    const distSq = state.started ? (f.x - state.x) ** 2 + (f.z - state.z) ** 2 : 0;
+    if (distSq <= 110 * 110) {
+      nearbyFoundationOBBs.push(buildFoundationBlockOBB(f, 0));
     }
   }
 
@@ -3772,12 +4755,13 @@ function stepPlanksPhysics(dt) {
     state.heldItem === "nails" ||
     state.heldItem === "hammer" ||
     state.heldItem === "plank" ||
-    state.heldItem === "saw";
+    state.heldItem === "saw" ||
+    state.heldItem === "shovel" ||
+    state.heldItem === "foundation_block";
 
   for (let step = 0; step < subSteps; step++) {
-    // 2. Интеграция гравитации и перемещения
     for (const body of bodies.values()) {
-      if (body.isGrabbed || body.isFarInactive) continue;
+      if (body.isStatic || body.isFarInactive) continue;
       body.vel.y -= 16.5 * subDt;
       body.vel.multiplyScalar(Math.max(0, 1 - 0.65 * subDt));
       body.angVel.multiplyScalar(Math.max(0, 1 - 1.6 * subDt));
@@ -3786,11 +4770,10 @@ function stepPlanksPhysics(dt) {
       applyBodyRotationDelta(body, body.angVel.clone().multiplyScalar(subDt));
     }
 
-    // 3. Мягкое горизонтальное столкновение игрока с высокими препятствиями (не сбиваем лежащие стопки досок и не мешаем забивать гвозди)
     if (state.started && !holdingBuildTool) {
       const playerCenter = new THREE.Vector3(state.x, state.y + 0.55, state.z);
       for (const body of bodies.values()) {
-        if (body.isGrabbed || body.isFarInactive) continue;
+        if (body.isStatic || body.isFarInactive) continue;
         if (body.com.distanceToSquared(playerCenter) > 16.0) continue;
         for (const pl of body.members) {
           const obb = getOBB(pl);
@@ -3811,17 +4794,40 @@ function stepPlanksPhysics(dt) {
       }
     }
 
-    // 4. Сначала выравниваем нижние доски по рельефу земли
     for (const body of bodies.values()) {
-      if (body.isGrabbed || body.isFarInactive) continue;
+      if (body.isStatic || body.isFarInactive) continue;
       solveGroundPositionForBody(body);
       body.verticallySupported = body.touchingGround;
     }
 
-    // Сортируем ближние доски снизу вверх, чтобы стопки разрешались от фундамента к верхним ярусам
+    if (nearbyFoundationOBBs.length > 0) {
+      for (const pl of nearbyPlanks) {
+        const body = bodies.get(pl.groupId);
+        if (!body || body.isStatic || body.isFarInactive) continue;
+        for (const fObb of nearbyFoundationOBBs) {
+          const dx = pl.x - fObb.center.x;
+          const dz = pl.z - fObb.center.z;
+          if (dx * dx + dz * dz > 9.0) continue;
+          const pObb = getOBB(pl);
+          const col = testOBBCollision(pObb, fObb, 0.003);
+          if (!col) continue;
+          const n = col.normal;
+          if (n.y > 0.55) {
+            body.verticallySupported = true;
+            for (const pt of col.points) body.groundSupportPts.push({ x: pt.x, z: pt.z });
+            if (col.depth > 0.0005) {
+              const lift = (col.depth - 0.0005) / n.y;
+              translateBody(body, new THREE.Vector3(0, lift * 0.85, 0));
+            }
+          } else if (col.depth > 0.0005) {
+            translateBody(body, n.clone().multiplyScalar((col.depth - 0.0005) * 0.7));
+          }
+        }
+      }
+    }
+
     nearbyPlanks.sort((a, b) => a.y - b.y);
 
-    // 5. Позиционное разделение досок друг с другом (строго вертикальный подъём на стопках — 0.0000м горизонтального съезжания!)
     for (let pPass = 0; pPass < 2; pPass++) {
       for (let i = 0; i < nearbyPlanks.length; i++) {
         const plA = nearbyPlanks[i];
@@ -3831,10 +4837,11 @@ function stepPlanksPhysics(dt) {
         for (let j = i + 1; j < nearbyPlanks.length; j++) {
           const plB = nearbyPlanks[j];
           if (plA.groupId === plB.groupId) continue;
+          if (nailedPlankPairs.has(makePairKey(plA.id, plB.id))) continue;
 
           const bodyB = bodies.get(plB.groupId);
           if (!bodyB) continue;
-          if ((bodyA.isGrabbed || bodyA.isFarInactive) && (bodyB.isGrabbed || bodyB.isFarInactive)) continue;
+          if ((bodyA.isStatic || bodyA.isFarInactive) && (bodyB.isStatic || bodyB.isFarInactive)) continue;
 
           const dx = plA.x - plB.x;
           const dz = plA.z - plB.z;
@@ -3854,15 +4861,15 @@ function stepPlanksPhysics(dt) {
             const lower = aIsUpper ? bodyB : bodyA;
             const absNy = Math.abs(n.y);
 
-            if (lower.verticallySupported || lower.isGrabbed) {
+            if (lower.verticallySupported || lower.isStatic) {
               upper.verticallySupported = true;
             }
 
             if (col.depth > slop) {
               const effUpperInvM = upper.invMass;
-              const effLowerInvM = lower.verticallySupported || lower.isGrabbed ? 0 : lower.invMass;
+              const effLowerInvM = lower.verticallySupported || lower.isStatic ? 0 : lower.invMass;
               const effUpperInvI = upper.invInertia;
-              const effLowerInvI = lower.verticallySupported || lower.isGrabbed ? 0 : lower.invInertia;
+              const effLowerInvI = lower.verticallySupported || lower.isStatic ? 0 : lower.invInertia;
 
               const cop = clampPointToHullXZ(upper.com.x, upper.com.z, col.points, upper.groundSupportPts);
               const rU = cop.clone().sub(upper.com);
@@ -3907,18 +4914,19 @@ function stepPlanksPhysics(dt) {
       }
 
       for (const body of bodies.values()) {
-        if (body.isGrabbed || body.isFarInactive) continue;
+        if (body.isStatic || body.isFarInactive) continue;
         solveGroundPositionForBody(body);
       }
     }
 
-    // 6. Собираем контактные манифолды (земля + доска-о-доску) для совместного солвера импульсов и сухого трения
+    solveHingeJointsPass(bodies, subDt);
+
     const groundManifolds = [];
     const supportCandidates = new Map();
     for (const gid of bodies.keys()) supportCandidates.set(gid, []);
 
     for (const body of bodies.values()) {
-      if (body.isGrabbed || body.isFarInactive) continue;
+      if (body.isStatic || body.isFarInactive) continue;
       const contacts = [];
       for (const pl of body.members) {
         const pts = getPlankGroundPoints(pl);
@@ -3950,6 +4958,37 @@ function stepPlanksPhysics(dt) {
             }
           }
         }
+        if (nearbyFoundationOBBs.length > 0) {
+          const pObb = buildPlankOBB(pl, 0.003);
+          for (const fObb of nearbyFoundationOBBs) {
+            if ((pl.x - fObb.center.x) ** 2 + (pl.z - fObb.center.z) ** 2 > 9.0) continue;
+            const col = testOBBCollision(pObb, fObb, 0.004);
+            if (!col) continue;
+            const n = col.normal;
+            const ref = Math.abs(n.y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
+            const t1 = new THREE.Vector3().crossVectors(n, ref).normalize();
+            const t2 = new THREE.Vector3().crossVectors(n, t1).normalize();
+            for (const pt of col.points) {
+              const r = pt.clone().sub(body.com);
+              const rXn = new THREE.Vector3().crossVectors(r, n);
+              const rXt1 = new THREE.Vector3().crossVectors(r, t1);
+              const rXt2 = new THREE.Vector3().crossVectors(r, t2);
+              contacts.push({
+                nx: n.x, ny: n.y, nz: n.z,
+                t1x: t1.x, t1y: t1.y, t1z: t1.z,
+                t2x: t2.x, t2y: t2.y, t2z: t2.z,
+                rx: r.x, ry: r.y, rz: r.z,
+                kN: body.invMass + rXn.lengthSq() * body.invInertia,
+                kT1: body.invMass + rXt1.lengthSq() * body.invInertia,
+                kT2: body.invMass + rXt2.lengthSq() * body.invInertia,
+                jnAcc: 0, jt1Acc: 0, jt2Acc: 0
+              });
+              if (n.y > 0.55) {
+                supportCandidates.get(body.gid).push({ x: pt.x, z: pt.z, fromGid: "GROUND" });
+              }
+            }
+          }
+        }
       }
       if (contacts.length > 0) {
         const weight = 1 / Math.max(1, Math.min(4, contacts.length * 0.5));
@@ -3970,10 +5009,11 @@ function stepPlanksPhysics(dt) {
       for (let j = i + 1; j < nearbyPlanks.length; j++) {
         const plB = nearbyPlanks[j];
         if (plA.groupId === plB.groupId) continue;
+        if (nailedPlankPairs.has(makePairKey(plA.id, plB.id))) continue;
 
         const bodyB = bodies.get(plB.groupId);
         if (!bodyB) continue;
-        if ((bodyA.isGrabbed || bodyA.isFarInactive) && (bodyB.isGrabbed || bodyB.isFarInactive)) continue;
+        if ((bodyA.isStatic || bodyA.isFarInactive) && (bodyB.isStatic || bodyB.isFarInactive)) continue;
 
         const obbB = velObbCache.get(plB.id);
         const col = testOBBCollision(obbA, obbB, 0.003);
@@ -4016,18 +5056,15 @@ function stepPlanksPhysics(dt) {
         }
 
         plankManifolds.push({
-          bodyA,
-          bodyB,
+          bodyA, bodyB,
           nx: n.x, ny: n.y, nz: n.z,
           t1x: t1.x, t1y: t1.y, t1z: t1.z,
           t2x: t2.x, t2y: t2.y, t2z: t2.z,
-          rotScale,
-          cps
+          rotScale, cps
         });
       }
     }
 
-    // 7. Совместный итеративный солвер скоростей и 2D сухого трения Кулона (земля + дерево о дерево)
     const solveGroundPass = () => {
       for (const gm of groundManifolds) {
         const { body, contacts, weight } = gm;
@@ -4072,13 +5109,11 @@ function stepPlanksPhysics(dt) {
           const magSq = newJt1 * newJt1 + newJt2 * newJt2;
           if (magSq > maxJt * maxJt && magSq > 1e-18) {
             const s = maxJt / Math.sqrt(magSq);
-            newJt1 *= s;
-            newJt2 *= s;
+            newJt1 *= s; newJt2 *= s;
           }
           const dJt1 = newJt1 - c.jt1Acc;
           const dJt2 = newJt2 - c.jt2Acc;
-          c.jt1Acc = newJt1;
-          c.jt2Acc = newJt2;
+          c.jt1Acc = newJt1; c.jt2Acc = newJt2;
           if (dJt1 !== 0 || dJt2 !== 0) {
             const ix = c.t1x * dJt1 + c.t2x * dJt2;
             const iy = c.t1y * dJt1 + c.t2y * dJt2;
@@ -4150,13 +5185,11 @@ function stepPlanksPhysics(dt) {
             const magSq = newJt1 * newJt1 + newJt2 * newJt2;
             if (magSq > maxJt * maxJt && magSq > 1e-18) {
               const s = maxJt / Math.sqrt(magSq);
-              newJt1 *= s;
-              newJt2 *= s;
+              newJt1 *= s; newJt2 *= s;
             }
             const dJt1 = newJt1 - cp.jt1Acc;
             const dJt2 = newJt2 - cp.jt2Acc;
-            cp.jt1Acc = newJt1;
-            cp.jt2Acc = newJt2;
+            cp.jt1Acc = newJt1; cp.jt2Acc = newJt2;
 
             if (dJt1 !== 0 || dJt2 !== 0) {
               const ix = t1x * dJt1 + t2x * dJt2;
@@ -4180,15 +5213,18 @@ function stepPlanksPhysics(dt) {
       }
     }
     solveGroundPass();
+    solveHingeJointsPass(bodies, subDt);
 
-    // 8. Проверка площади опоры снизу вверх (земля -> нижняя доска -> верхняя доска) для полного покоя без левитации
     const stableGrounded = new Set(["GROUND"]);
+    for (const body of bodies.values()) {
+      if (body.isAnchored) stableGrounded.add(body.gid);
+    }
     let changed = true;
     let guard = 0;
     while (changed && guard++ < 8) {
       changed = false;
       for (const body of bodies.values()) {
-        if (body.isGrabbed || body.isFarInactive || stableGrounded.has(body.gid)) continue;
+        if (body.isStatic || body.isFarInactive || stableGrounded.has(body.gid)) continue;
         const cands = supportCandidates.get(body.gid);
         if (!cands || cands.length < 3) continue;
         const validPts = [];
@@ -4203,7 +5239,7 @@ function stepPlanksPhysics(dt) {
     }
 
     for (const body of bodies.values()) {
-      if (body.isGrabbed || body.isFarInactive) continue;
+      if (body.isStatic || body.isFarInactive) continue;
       const cands = supportCandidates.get(body.gid);
       if (!cands || cands.length === 0) continue;
       const comSupported = stableGrounded.has(body.gid);
@@ -4217,9 +5253,8 @@ function stepPlanksPhysics(dt) {
     }
   }
 
-  // 9. Записываем обновлённые скорости и координаты в доски один раз после всех подшагов
   for (const body of bodies.values()) {
-    if (body.isGrabbed || body.isFarInactive) continue;
+    if (body.isStatic || body.isFarInactive) continue;
     for (const pl of body.members) {
       pl.x = +pl.x.toFixed(4);
       pl.y = +pl.y.toFixed(4);
@@ -4255,21 +5290,66 @@ function stepPlanksPhysics(dt) {
 
 function demolishNearestStructure() {
   const surf = raycastPlankSurface(5.5);
-  if (!surf) {
-    showToast("Наведите прицел на доску и нажмите [X], чтобы убрать её в инвентарь.");
+  if (surf) {
+    const pl = surf.plank;
+    if (pl.ownerName && pl.ownerName !== state.name && pl.ownerKey !== state.playerKey) {
+      showToast(`⚠️ Эта доска привязана к нику ${pl.ownerName}!`);
+      return;
+    }
+    if (pl.isAnchored) {
+      showToast("⚓ Доска притянута анкером к фундаменту! Сначала вытяните анкер гвоздодёром (зажмите ПКМ молотком).");
+      return;
+    }
+    const nailsRefund = Array.isArray(pl.nails) ? pl.nails.length : 0;
+    removePlankById(pl.id, true);
+    state.inv.plank = (state.inv.plank || 0) + 1;
+    if (nailsRefund > 0) state.inv.nails = (state.inv.nails || 0) + nailsRefund;
+    playSfx("chop");
+    showToast(nailsRefund > 0 ? `🪵 Доска (+1) и гвозди (+${nailsRefund}) возвращены в инвентарь.` : "🪵 Доска возвращена в инвентарь.");
+    updateHudUI();
+    saveLocalProfile();
     return;
   }
-  const pl = surf.plank;
-  if (pl.ownerName && pl.ownerName !== state.name && pl.ownerKey !== state.playerKey) {
-    showToast(`⚠️ Эта доска привязана к нику ${pl.ownerName}!`);
-    return;
+
+  const fHit = raycastFoundationAtCrosshair(5.5);
+  if (fHit) {
+    const f = fHit.foundation;
+    if (f.ownerName && f.ownerName !== state.name && f.ownerKey !== state.playerKey) {
+      showToast(`⚠️ Этот фундамент принадлежит ${f.ownerName}!`);
+      return;
+    }
+    for (const p of Object.values(state.planks)) {
+      if (Array.isArray(p.nails) && p.nails.some((n) => n.anchoredToBlockId === f.id && (n.depth ?? 0) >= 0.99)) {
+        showToast("⚓ К этому блоку притянута обвязка! Сначала вытяните анкер гвоздодёром [ПКМ молотком].");
+        return;
+      }
+    }
+    if (f.stage === "block") {
+      state.inv.foundation_block = (state.inv.foundation_block || 0) + 1;
+      if (f.hasPit) {
+        f.stage = "pit";
+        spawnOrUpdateFoundationMesh(f);
+        saveWorldFoundations();
+        broadcastNetworkPacket({ type: "foundation_updated", foundation: f }, true);
+        showToast("🧱 Блок ФБС снят из лунки и возвращён в инвентарь (+1).");
+      } else {
+        removeFoundationById(f.id, true);
+        showToast("🧱 Блок ФБС возвращён в инвентарь (+1).");
+      }
+      playSfx("concrete");
+      updateHudUI();
+      saveLocalProfile();
+      return;
+    }
+    if (f.stage === "pit") {
+      removeFoundationById(f.id, true);
+      playSfx("dig");
+      showToast("🪏 Пустая лунка закопана.");
+      return;
+    }
   }
-  removePlankById(pl.id, true);
-  state.inv.plank = (state.inv.plank || 0) + 1;
-  playSfx("chop");
-  showToast("🪵 Доска возвращена в инвентарь.");
-  updateHudUI();
-  saveLocalProfile();
+
+  showToast("Наведите прицел на доску или фундамент и нажмите [X], чтобы убрать в инвентарь.");
 }
 
 // ==========================================
@@ -4311,6 +5391,8 @@ window.addEventListener("keydown", (e) => {
     else if (state.heldItem === "nails") placeNailAtCrosshairAction();
     else if (state.heldItem === "hammer") hammerNailAtCrosshairAction();
     else if (state.heldItem === "saw") sawPlankAtCrosshairAction();
+    else if (state.heldItem === "shovel") digFoundationPitAction();
+    else if (state.heldItem === "foundation_block") placeFoundationBlockAction();
     else executeInteraction(findNearestInteractable());
   } else if (k === "KeyI" || k === "Tab") { e.preventDefault(); openInventoryModal(); }
   else if (k === "KeyF" && !grabState.active) eatFoodAction();
@@ -4349,6 +5431,10 @@ function triggerPrimaryAction() {
     hammerNailAtCrosshairAction();
   } else if (state.heldItem === "saw") {
     sawPlankAtCrosshairAction();
+  } else if (state.heldItem === "shovel") {
+    digFoundationPitAction();
+  } else if (state.heldItem === "foundation_block") {
+    placeFoundationBlockAction();
   } else {
     const nearest = findNearestInteractable();
     if (nearest) executeInteraction(nearest);
@@ -4436,8 +5522,12 @@ window.addEventListener("mouseup", (e) => {
   isDraggingCam = false;
   if (modalBackdrop.style.display === "flex") return;
 
-  if ((wasLocked || isTouchModeActive()) && !dragMoved && !grabStartedThisClick && state.started && e.button === 0 && e.target === canvas) {
-    triggerPrimaryAction();
+  if ((wasLocked || isTouchModeActive()) && !dragMoved && !grabStartedThisClick && state.started && e.target === canvas) {
+    if (e.button === 0) {
+      triggerPrimaryAction();
+    } else if (e.button === 2 && state.heldItem === "shovel") {
+      fillFoundationPitAtCrosshairAction();
+    }
   }
   grabStartedThisClick = false;
 });
@@ -4789,6 +5879,22 @@ bindHoldButton("btn-mob-demolish", () => {
   demolishNearestStructure();
 });
 
+// Контекстная кнопка Гвоздодёра / Закапывания лунки на телефонах
+bindHoldButton(
+  "btn-mob-secondary",
+  () => {
+    if (!state.started) return;
+    if (state.heldItem === "hammer") {
+      mobSecondaryDown = true;
+    } else if (state.heldItem === "shovel") {
+      fillFoundationPitAtCrosshairAction();
+    }
+  },
+  () => {
+    mobSecondaryDown = false;
+  }
+);
+
 // Кнопка В рюкзак [G]
 bindHoldButton("btn-mob-stash", () => {
   if (!state.started) return;
@@ -4822,6 +5928,18 @@ function updateMobileControlsUI() {
     useBtn.classList.toggle("highlight", Boolean(nearest));
   }
 
+  const secBtn = document.getElementById("btn-mob-secondary");
+  if (secBtn) {
+    if (state.heldItem === "hammer") {
+      secBtn.style.display = "inline-flex";
+      secBtn.textContent = "🔧 Гвоздодёр";
+    } else if (state.heldItem === "shovel") {
+      secBtn.style.display = "inline-flex";
+      secBtn.textContent = "🕳️ Закопать";
+    } else {
+      secBtn.style.display = "none";
+    }
+  }
   if (primBtn && primIcon && primText) {
     primBtn.classList.toggle("grabbing", grabState.active);
     const held = state.heldItem;
@@ -4840,6 +5958,12 @@ function updateMobileControlsUI() {
     } else if (held === "saw") {
       primIcon.textContent = "🪚";
       primText.textContent = "Пилить";
+    } else if (held === "shovel") {
+      primIcon.textContent = "🪏";
+      primText.textContent = "Копать";
+    } else if (held === "foundation_block") {
+      primIcon.textContent = "🧱";
+      primText.textContent = "Блок ФБС";
     } else if (held === "axe") {
       primIcon.textContent = "🪓";
       primText.textContent = "Рубить";
@@ -5243,6 +6367,7 @@ function resetPlayerProgressAndObjects() {
   removeObjectsByOwner(nick || state.name, state.playerKey, true);
   safeStorageRemove(PROFILE_STORAGE_KEY);
   safeStorageRemove(WORLD_PLANKS_STORAGE_KEY);
+  safeStorageRemove(WORLD_FOUNDATIONS_STORAGE_KEY);
   setTimeout(() => window.location.reload(), 120);
 }
 
@@ -5281,9 +6406,13 @@ function startGame() {
   cleanupDepartedPlayers();
   ensureChunksAroundPlayer();
   refreshAllPlotSigns();
+  for (const fnd of Object.values(state.foundations)) {
+    spawnOrUpdateFoundationMesh(fnd);
+  }
   for (const pl of Object.values(state.planks)) {
     spawnOrUpdatePlankMesh(pl);
   }
+  recomputePlankGroupsAndJoints();
   updateHudUI();
   initMultiplayerNetwork();
   lockPointerSafe();
@@ -5376,6 +6505,14 @@ function animate(now) {
     state.y += state.vy * dt;
 
     let groundY = getTerrainHeight(state.x, state.z);
+    for (const f of Object.values(state.foundations)) {
+      if (f.stage !== "block") continue;
+      if (Math.abs(f.x - state.x) <= (f.w || 0.64) * 0.5 + 0.22 && Math.abs(f.z - state.z) <= (f.d || 0.64) * 0.5 + 0.22) {
+        if (f.topY <= state.y + 0.42 && f.topY > groundY) {
+          groundY = f.topY;
+        }
+      }
+    }
     for (const pl of Object.values(state.planks)) {
       if (Math.abs(pl.x - state.x) > 2.6 || Math.abs(pl.z - state.z) > 2.6) continue;
       const m = plankMeshes.get(pl.id);
@@ -5442,8 +6579,35 @@ function animate(now) {
 
   if (state.started) {
     updateHandGrab(dt);
+    updateHammerPry(dt);
     stepPlanksPhysics(dt);
     checkDumpsterPlankDisposal();
+
+    if (state.heldItem === "shovel" && modalBackdrop.style.display !== "flex") {
+      const terr = raycastTerrainPoint(5.6);
+      if (terr) {
+        pitPreviewMesh.position.set(terr.x, terr.y, terr.z);
+        pitPreviewMesh.rotation.y = state.plankSpawnYaw || 0;
+        pitPreviewMesh.visible = true;
+      } else {
+        pitPreviewMesh.visible = false;
+      }
+    } else {
+      pitPreviewMesh.visible = false;
+    }
+
+    if (state.heldItem === "foundation_block" && (state.inv.foundation_block || 0) > 0 && modalBackdrop.style.display !== "flex") {
+      const fp = getFoundationPlacementPreview();
+      if (fp) {
+        foundationPreviewMesh.position.set(fp.x, fp.topY - 0.28, fp.z);
+        foundationPreviewMesh.rotation.y = fp.yaw || 0;
+        foundationPreviewMesh.visible = true;
+      } else {
+        foundationPreviewMesh.visible = false;
+      }
+    } else {
+      foundationPreviewMesh.visible = false;
+    }
 
     if (state.heldItem === "plank" && (state.inv.plank || 0) > 0 && modalBackdrop.style.display !== "flex") {
       const tr = getPlankSpawnTransform();
@@ -5455,7 +6619,7 @@ function animate(now) {
     }
 
     if (state.heldItem === "nails" && (state.inv.nails || 0) > 0 && modalBackdrop.style.display !== "flex") {
-      const surf = raycastPlankSurface(5.8);
+      const surf = raycastPlankSurface(6.2);
       if (surf) {
         nailPreviewGroup.position.copy(surf.point);
         nailPreviewGroup.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), surf.worldNormal);
@@ -5468,7 +6632,7 @@ function animate(now) {
     }
 
     if (state.heldItem === "saw" && modalBackdrop.style.display !== "flex") {
-      const surf = raycastPlankSurface(5.8);
+      const surf = raycastPlankSurface(6.2);
       if (surf && surf.plank) {
         const pl = surf.plank;
         const w = pl.w || 2.4;
@@ -5557,7 +6721,9 @@ function animate(now) {
 
     if (fpHand && fpHand.userData.arm) {
       const arm = fpHand.userData.arm;
-      if (state.workTimer > 0) {
+      if (pryState.active) {
+        arm.rotation.x = 0.55 + Math.sin(elapsedSec * 18) * 0.09;
+      } else if (state.workTimer > 0) {
         arm.rotation.x = 0.2 - Math.sin(state.workTimer * 26) * 0.85;
       } else {
         arm.rotation.x = 0.2 + Math.sin(elapsedSec * 2.5) * 0.03;

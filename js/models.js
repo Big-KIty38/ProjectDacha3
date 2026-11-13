@@ -1,5 +1,5 @@
-import * as THREE from "./vendor/three.js?v=24";
-import { CHUNK_SIZE, getTerrainHeight, getSurfaceType } from "./world.js?v=24";
+import * as THREE from "./vendor/three.js?v=25";
+import { CHUNK_SIZE, getTerrainHeight, getSurfaceType } from "./world.js?v=25";
 
 // ==========================================
 // ПРОЦЕДУРНЫЕ БЕСШОВНЫЕ ТЕКСТУРЫ (Трава, Береста, Кора сосны, Доски, Брус, Кирпич, Листва)
@@ -1042,8 +1042,8 @@ export function buildHeldItemMesh(heldId = "axe", hasSteelAxe = false, forFirstP
     handle.rotation.x = 0.32;
     handle.renderOrder = ro;
 
-    const headBlock = new THREE.Mesh(new THREE.BoxGeometry(0.058, 0.058, 0.19), darkIronMat);
-    headBlock.position.set(0, 0.19, 0.0);
+    const headBlock = new THREE.Mesh(new THREE.BoxGeometry(0.058, 0.058, 0.17), darkIronMat);
+    headBlock.position.set(0, 0.19, -0.005);
     headBlock.renderOrder = ro + 1;
     handle.add(headBlock);
 
@@ -1053,7 +1053,54 @@ export function buildHeldItemMesh(heldId = "axe", hasSteelAxe = false, forFirstP
     striker.renderOrder = ro + 1;
     handle.add(striker);
 
+    // Раздвоенный изогнутый гвоздодёр на затылке молотка
+    for (const sx of [-0.015, 0.015]) {
+      const claw = new THREE.Mesh(new THREE.BoxGeometry(0.018, 0.022, 0.085), steelMat);
+      claw.position.set(sx, 0.178, 0.108);
+      claw.rotation.x = -0.42;
+      claw.renderOrder = ro + 1;
+      handle.add(claw);
+    }
+
     group.add(handle);
+  } else if (heldId === "shovel") {
+    const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.019, 0.022, 0.56, 8), woodMat);
+    handle.position.set(0, 0.14, -0.06);
+    handle.rotation.x = 0.55;
+    handle.renderOrder = ro;
+
+    const gripBar = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.015, 0.11, 8), darkIronMat);
+    gripBar.rotation.z = Math.PI / 2;
+    gripBar.position.set(0, -0.28, 0);
+    gripBar.renderOrder = ro + 1;
+    handle.add(gripBar);
+
+    const blade = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.21, 0.014), steelMat);
+    blade.position.set(0, 0.34, 0.012);
+    blade.rotation.x = -0.14;
+    blade.renderOrder = ro + 1;
+    handle.add(blade);
+
+    const tip = new THREE.Mesh(new THREE.ConeGeometry(0.113, 0.08, 4), steelMat);
+    tip.rotation.y = Math.PI / 4;
+    tip.scale.set(1.0, 1.0, 0.14);
+    tip.position.set(0, 0.48, 0.024);
+    tip.renderOrder = ro + 1;
+    handle.add(tip);
+
+    group.add(handle);
+  } else if (heldId === "foundation_block") {
+    const concMat = new THREE.MeshStandardMaterial({ color: 0x9e9e9e, roughness: 0.9, depthTest: dt });
+    const rubMat = new THREE.MeshStandardMaterial({ color: 0x263238, roughness: 0.95, depthTest: dt });
+    const blk = new THREE.Mesh(new THREE.BoxGeometry(0.21, 0.15, 0.21), concMat);
+    blk.position.set(-0.02, 0.09, -0.08);
+    blk.rotation.set(0.15, 0.35, -0.06);
+    blk.renderOrder = ro;
+    const cap = new THREE.Mesh(new THREE.BoxGeometry(0.20, 0.016, 0.20), rubMat);
+    cap.position.set(0, 0.082, 0);
+    cap.renderOrder = ro + 1;
+    blk.add(cap);
+    group.add(blk);
   } else if (heldId === "saw") {
     // 3D-модель ручной ножовки по дереву с зубьями
     const gripMat = new THREE.MeshStandardMaterial({ color: 0xd84315, roughness: 0.45, depthTest: dt });
@@ -1307,40 +1354,183 @@ export function animatePlayerMesh(mesh, dt, time, isMoving, isWorking) {
 // ==========================================
 const NAIL_STEEL_MAT = new THREE.MeshStandardMaterial({ color: 0xcfd8dc, metalness: 0.72, roughness: 0.25 });
 const NAIL_HEAD_MAT = new THREE.MeshStandardMaterial({ color: 0x78909c, metalness: 0.78, roughness: 0.28 });
+const ANCHOR_BOLT_MAT = new THREE.MeshStandardMaterial({ color: 0xffd54f, metalness: 0.78, roughness: 0.24 });
+const ANCHOR_WASHER_MAT = new THREE.MeshStandardMaterial({ color: 0x90a4ae, metalness: 0.82, roughness: 0.28 });
 const NAIL_HITBOX_MAT = new THREE.MeshBasicMaterial({ visible: false });
 
 export function createSingleNailMesh(nail) {
   const nailGroup = new THREE.Group();
-  const totalLen = 0.20; // 20 см длина гвоздя для наглядности
-  const depth = Math.max(0.15, Math.min(1.0, nail.depth ?? 0.25));
+  const isAnchor = Boolean(nail.isAnchor || nail.anchoredToBlockId);
+  const totalLen = isAnchor ? 0.24 : 0.20;
+  const depth = Math.max(0.08, Math.min(1.0, nail.depth ?? 0.25));
   const protrude = (1.0 - depth) * (totalLen - 0.015);
 
-  // Ось Y группы гвоздя направлена вдоль нормали поверхности наружу
   const normal = new THREE.Vector3(nail.nx ?? 0, nail.ny ?? 1, nail.nz ?? 0).normalize();
   const up = new THREE.Vector3(0, 1, 0);
   nailGroup.quaternion.setFromUnitVectors(up, normal);
   nailGroup.position.set(nail.lx || 0, nail.ly || 0, nail.lz || 0);
 
-  // Стержень гвоздя: верхушка на высоте protrude, остриё уходит внутрь доски (protrude - totalLen)
-  const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.011, 0.0035, totalLen, 8), NAIL_STEEL_MAT);
-  shaft.position.y = protrude - totalLen / 2;
-  shaft.castShadow = true;
-  nailGroup.add(shaft);
+  if (isAnchor) {
+    // Толстая стальная шпилька анкера + прижимная квадратная шайба + шестигранная гайка
+    const stud = new THREE.Mesh(new THREE.CylinderGeometry(0.017, 0.016, totalLen, 8), ANCHOR_BOLT_MAT);
+    stud.position.y = protrude - totalLen / 2 + 0.012;
+    stud.castShadow = true;
+    nailGroup.add(stud);
 
-  // Шляпка гвоздя на вершине стержня
-  const head = new THREE.Mesh(new THREE.CylinderGeometry(0.032, 0.032, 0.012, 10), NAIL_HEAD_MAT);
-  head.position.y = protrude + 0.004;
-  head.castShadow = true;
-  nailGroup.add(head);
+    const washer = new THREE.Mesh(new THREE.BoxGeometry(0.095, 0.012, 0.095), ANCHOR_WASHER_MAT);
+    washer.position.y = Math.max(0.006, protrude * 0.25);
+    washer.castShadow = true;
+    nailGroup.add(washer);
 
-  // Удобный хитбокс для удара молотком
-  const hitbox = new THREE.Mesh(new THREE.CylinderGeometry(0.085, 0.085, totalLen + 0.08, 8), NAIL_HITBOX_MAT);
+    const nut = new THREE.Mesh(new THREE.CylinderGeometry(0.032, 0.032, 0.024, 6), ANCHOR_BOLT_MAT);
+    nut.position.y = protrude + 0.014;
+    nut.castShadow = true;
+    nailGroup.add(nut);
+  } else {
+    const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.011, 0.0035, totalLen, 8), NAIL_STEEL_MAT);
+    shaft.position.y = protrude - totalLen / 2;
+    shaft.castShadow = true;
+    nailGroup.add(shaft);
+
+    const head = new THREE.Mesh(new THREE.CylinderGeometry(0.032, 0.032, 0.012, 10), NAIL_HEAD_MAT);
+    head.position.y = protrude + 0.004;
+    head.castShadow = true;
+    nailGroup.add(head);
+  }
+
+  const hitbox = new THREE.Mesh(new THREE.CylinderGeometry(0.095, 0.095, totalLen + 0.10, 8), NAIL_HITBOX_MAT);
   hitbox.position.y = protrude / 2;
   hitbox.userData = { isNailHitbox: true, nailId: nail.id };
   nailGroup.add(hitbox);
 
-  nailGroup.userData = { nailId: nail.id, depth };
+  nailGroup.userData = { nailId: nail.id, depth, isAnchor };
   return nailGroup;
+}
+
+// Процедурные текстуры бетона ФБС и щебёночной подушки под лунки фундамента
+const TEX_CONCRETE_FBS = makeProceduralTexture(128, (ctx, s) => {
+  ctx.fillStyle = "#969a9c";
+  ctx.fillRect(0, 0, s, s);
+  for (let i = 0; i < 420; i++) {
+    const v = 125 + Math.floor(Math.random() * 50);
+    ctx.fillStyle = `rgb(${v},${v + 2},${v + 3})`;
+    ctx.fillRect(Math.random() * s, Math.random() * s, 3 + Math.random() * 6, 3 + Math.random() * 6);
+  }
+  ctx.strokeStyle = "rgba(60,65,68,0.45)";
+  ctx.lineWidth = 3;
+  ctx.strokeRect(4, 4, s - 8, s - 8);
+});
+
+const TEX_GRAVEL_BED = makeProceduralTexture(128, (ctx, s) => {
+  ctx.fillStyle = "#5d534a";
+  ctx.fillRect(0, 0, s, s);
+  for (let i = 0; i < 360; i++) {
+    const g = 95 + Math.floor(Math.random() * 75);
+    ctx.fillStyle = `rgb(${g},${g - 4},${g - 8})`;
+    ctx.beginPath();
+    ctx.arc(Math.random() * s, Math.random() * s, 2 + Math.random() * 4.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+});
+
+const SOIL_RIM_MAT = new THREE.MeshStandardMaterial({ color: 0x4e342e, roughness: 0.96 });
+const GRAVEL_PAD_MAT = new THREE.MeshStandardMaterial({ map: TEX_GRAVEL_BED, roughness: 0.94 });
+const CONCRETE_FBS_MAT = new THREE.MeshStandardMaterial({ map: TEX_CONCRETE_FBS, roughness: 0.86, metalness: 0.05 });
+const RUBEROID_MAT = new THREE.MeshStandardMaterial({ color: 0x212529, roughness: 0.92, metalness: 0.08 });
+const REBAR_LOOP_MAT = new THREE.MeshStandardMaterial({ color: 0x607d8b, metalness: 0.72, roughness: 0.35 });
+
+export function createFoundationMesh(fData) {
+  const group = new THREE.Group();
+  const w = fData.w || 0.64;
+  const d = fData.d || 0.64;
+  const gY = typeof fData.groundY === "number" ? fData.groundY : getTerrainHeight(fData.x || 0, fData.z || 0);
+  const topY = typeof fData.topY === "number" ? fData.topY : gY + 0.28;
+
+  group.position.set(fData.x || 0, gY, fData.z || 0);
+  group.rotation.y = fData.yaw || 0;
+
+  // Земляной бруствер и щебёночная подушка лунки (если лунка выкопана лопатой или есть приямок)
+  if (fData.stage === "pit" || fData.hasPit) {
+    const pitW = w + 0.18;
+    const pitD = d + 0.18;
+    const gravel = new THREE.Mesh(new THREE.BoxGeometry(pitW - 0.06, 0.05, pitD - 0.06), GRAVEL_PAD_MAT);
+    gravel.position.y = 0.012;
+    gravel.receiveShadow = true;
+    gravel.userData = { isFoundationHitbox: true, foundationId: fData.id };
+    group.add(gravel);
+
+    const rimThick = 0.09;
+    const rimH = 0.065;
+    const rimN = new THREE.Mesh(new THREE.BoxGeometry(pitW + rimThick, rimH, rimThick), SOIL_RIM_MAT);
+    rimN.position.set(0, rimH * 0.4, -pitD / 2);
+    const rimS = rimN.clone();
+    rimS.position.set(0, rimH * 0.4, pitD / 2);
+    const rimW = new THREE.Mesh(new THREE.BoxGeometry(rimThick, rimH, pitD), SOIL_RIM_MAT);
+    rimW.position.set(-pitW / 2, rimH * 0.4, 0);
+    const rimE = rimW.clone();
+    rimE.position.set(pitW / 2, rimH * 0.4, 0);
+    group.add(rimN, rimS, rimW, rimE);
+
+    if (fData.stage === "pit") {
+      // Деревянные разметочные колышки по углам выкопанной лунки
+      const stakeMat = new THREE.MeshStandardMaterial({ color: 0xd7a86e, roughness: 0.85 });
+      for (const sx of [-1, 1]) {
+        for (const sz of [-1, 1]) {
+          const stake = new THREE.Mesh(new THREE.CylinderGeometry(0.016, 0.012, 0.22, 6), stakeMat);
+          stake.position.set(sx * (pitW * 0.48), 0.10, sz * (pitD * 0.48));
+          stake.castShadow = true;
+          group.add(stake);
+        }
+      }
+    }
+  }
+
+  // Бетонный фундаментный блок ФБС с уходом в склон, рубероидной гидроизоляцией и закладной пластиной под анкер
+  if (fData.stage === "block") {
+    const bottomRelY = -0.38; // уходит в грунт, чтобы на любом склоне не висел в воздухе
+    const topRelY = Math.max(0.12, topY - gY);
+    const blockH = topRelY - bottomRelY;
+
+    const concreteBox = new THREE.Mesh(new THREE.BoxGeometry(w, blockH, d), CONCRETE_FBS_MAT);
+    concreteBox.position.y = bottomRelY + blockH / 2;
+    concreteBox.castShadow = true;
+    concreteBox.receiveShadow = true;
+    concreteBox.userData = { isFoundationHitbox: true, foundationId: fData.id };
+    group.add(concreteBox);
+
+    const edges = new THREE.LineSegments(
+      new THREE.EdgesGeometry(concreteBox.geometry),
+      new THREE.LineBasicMaterial({ color: 0x455a64, transparent: true, opacity: 0.5 })
+    );
+    concreteBox.add(edges);
+
+    // Слой гидроизоляции (рубероид) сверху блока
+    const ruberoid = new THREE.Mesh(new THREE.BoxGeometry(w + 0.02, 0.014, d + 0.02), RUBEROID_MAT);
+    ruberoid.position.y = topRelY - 0.006;
+    ruberoid.receiveShadow = true;
+    ruberoid.userData = { isFoundationHitbox: true, foundationId: fData.id };
+    group.add(ruberoid);
+
+    // Стальная закладная шайба/площадка и монтажные проушины ФБС
+    const plate = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.012, 0.16), REBAR_LOOP_MAT);
+    plate.position.y = topRelY + 0.002;
+    group.add(plate);
+
+    for (const sx of [-0.21, 0.21]) {
+      const loop = new THREE.Mesh(new THREE.TorusGeometry(0.036, 0.008, 6, 10, Math.PI), REBAR_LOOP_MAT);
+      loop.position.set(sx, topRelY - 0.01, 0);
+      group.add(loop);
+    }
+  }
+
+  group.userData = {
+    foundationId: fData.id,
+    stage: fData.stage,
+    topY,
+    w,
+    d
+  };
+  return group;
 }
 
 export function rebuildPlankNailsMesh(plankGroup, plankData) {
@@ -1364,6 +1554,7 @@ export function rebuildPlankNailsMesh(plankGroup, plankData) {
       nailsHolder.add(nm);
     }
   }
+  plankGroup.updateMatrixWorld(true);
 }
 
 export function createPhysicalPlankMesh(plankData) {

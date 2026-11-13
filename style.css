@@ -1517,3 +1517,37 @@ body.touch-mode #mobile-controls {
     font-size: 11px !important;
   }
 }
+
+/* ИНДИКАТОР ГВОЗДОДЁРА У ПРИЦЕЛА */
+#pry-progress-pill {
+  position: fixed;
+  left: 50%;
+  top: calc(50% + 22px);
+  transform: translateX(-50%);
+  z-index: 45;
+  background: rgba(20, 32, 24, 0.92);
+  border: 1px solid #ffb74d;
+  border-radius: 10px;
+  padding: 5px 12px;
+  color: #fff8e1;
+  font-size: 12px;
+  font-weight: 600;
+  pointer-events: none;
+  min-width: 175px;
+  text-align: center;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+}
+.pry-bar-bg {
+  width: 100%;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 4px;
+  margin-top: 4px;
+  overflow: hidden;
+}
+#pry-bar-fill {
+  width: 0%;
+  height: 100%;
+  background: linear-gradient(90deg, #ffb74d, #ff7043);
+  transition: width 0.05s linear;
+}

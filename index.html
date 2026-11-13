@@ -7,14 +7,14 @@
   <script type="importmap">
     {
       "imports": {
-        "three": "./js/vendor/three.js?v=24",
-        "nostr-tools/pure": "./js/vendor/nostr-pure.js?v=24",
-        "peerjs": "./js/vendor/peerjs.js?v=24",
-        "mqtt": "./js/vendor/mqtt.js?v=24"
+        "three": "./js/vendor/three.js?v=25",
+        "nostr-tools/pure": "./js/vendor/nostr-pure.js?v=25",
+        "peerjs": "./js/vendor/peerjs.js?v=25",
+        "mqtt": "./js/vendor/mqtt.js?v=25"
       }
     }
   </script>
-  <link rel="stylesheet" href="style.css?v=24" />
+  <link rel="stylesheet" href="style.css?v=25" />
 </head>
 <body>
   <canvas id="game-canvas"></canvas>
@@ -59,6 +59,10 @@
   <!-- ИГРОВОЙ ИНТЕРФЕЙС (HUD) -->
   <div id="hud">
     <div id="crosshair"></div>
+    <div id="pry-progress-pill" style="display:none;">
+      <span id="pry-progress-label">🔧 Вытягиваем гвоздь...</span>
+      <div class="pry-bar-bg"><div id="pry-bar-fill"></div></div>
+    </div>
 
     <div class="hud-top-left">
       <div class="player-card">
@@ -180,7 +184,8 @@
       <!-- Правый блок кнопок действий -->
       <div class="mob-right-cluster">
         <div class="mob-sec-row">
-          <button class="mob-sec-btn" id="btn-mob-rotate" type="button" title="Повернуть доску [R]">🔄 Пов.</button>
+          <button class="mob-sec-btn" id="btn-mob-secondary" type="button" style="display:none;border-color:#ffb74d;color:#ffe082;">🔧 Гвоздодёр</button>
+          <button class="mob-sec-btn" id="btn-mob-rotate" type="button" title="Повернуть доску / блок [R]">🔄 Пов.</button>
           <button class="mob-sec-btn" id="btn-mob-demolish" type="button" title="Вернуть доску в инвентарь [X]">🪵⬅ Убрать</button>
           <button class="mob-sec-btn" id="btn-mob-stash" type="button" title="Убрать предмет в рюкзак [G]">🎒 В рюкзак</button>
         </div>
@@ -206,7 +211,7 @@
       <div id="held-item-banner">В руке: 🪓 Топор</div>
       <div id="inventory-bar"></div>
       <div class="controls-hint">
-        <b>1–9 / Колесо</b> — Предмет в руке • <b>Рука [1] + удерж. ЛКМ</b> — Тащить доску (<b>+ Q / E / R + мышь</b> — Вращать по оси) • <b>Гвозди [3] / Молоток [4]</b> — Сбивать доски • <b>F</b> — Еда из руки
+        <b>1–9 / Колесо</b> — Слот • <b>Лопата + Блок ФБС + Анкер</b> — Неподвижный фундамент • <b>1 гвоздь</b> = шарнир, <b>2 гвоздя / укосина</b> = жёстко • <b>Молоток: ЛКМ</b> бить / <b>удерж. ПКМ</b> гвоздодёр
       </div>
     </div>
   </div>
@@ -225,6 +230,6 @@
 
   <div id="toast-container"></div>
 
-  <script type="module" src="js/game.js?v=24"></script>
+  <script type="module" src="js/game.js?v=25"></script>
 </body>
 </html>

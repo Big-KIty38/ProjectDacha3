@@ -7,6 +7,7 @@ export const ITEMS = {
   nails: { name: "Гвозди", icon: "🔩", food: 0 },
   berry: { name: "Лесные ягоды", icon: "🍓", food: 18 },
   plank: { name: "Доски", icon: "🪚", food: 0 },
+  foundation_block: { name: "Блок ФБС", icon: "🧱", food: 0 },
   timber: { name: "Брус", icon: "🧱", food: 0 },
   brick: { name: "Кирпич", icon: "🧱", food: 0 },
   glass: { name: "Стеклопакет", icon: "🪟", food: 0 },
@@ -73,10 +74,17 @@ export const CRAFT_RECIPES = [
   },
   {
     id: "craft_nails",
-    title: "🔩 Строительные гвозди (x10)",
-    desc: "Крепёжные гвозди (можно держать в руке и использовать на стройке).",
+    title: "🔩 Гвозди и анкеры (x12)",
+    desc: "Крепёж для досок (1 гвоздь = шарнир, 2 = жёстко) и анкеровки обвязки к блокам ФБС.",
     cost: { stone: 1, branch: 1 },
-    out: { nails: 10 }
+    out: { nails: 12 }
+  },
+  {
+    id: "craft_foundation_block",
+    title: "🧱 Фундаментные блоки ФБС (x2)",
+    desc: "Бетонные блоки с гидроизоляцией для неподвижного фундамента дома (ставятся в лунки от лопаты или по углам).",
+    cost: { stone: 2 },
+    out: { foundation_block: 2 }
   },
   {
     id: "craft_timber",
@@ -146,6 +154,7 @@ export const SHOP_GOODS = [
   { id: "buy_pie", title: "🥟 Горячий дачный пирожок", desc: "Возьмите в руку и нажмите [F] — восстанавливает +50% сытости.", price: 25, out: { pie: 1 } },
   { id: "buy_nails", title: "🔩 Коробка гвоздей (x15)", desc: "Крепёжные гвозди для сколачивания физических досок.", price: 18, out: { nails: 15 } },
   { id: "buy_planks", title: "🪚 Пачка досок (x12)", desc: "Строганые сосновые доски с физикой для постройки вручную.", price: 20, out: { plank: 12 } },
+  { id: "buy_foundation_blocks", title: "🧱 Фундаментные блоки ФБС (x4)", desc: "Бетонные блоки под нижний венец дома (выравнивают уклон рельефа и держат анкеры).", price: 28, out: { foundation_block: 4 } },
   { id: "buy_fert", title: "🧪 Удобрение «Био-Дача» (x2)", desc: "Ускоряет созревание любой грядки.", price: 35, out: { fertilizer: 2 } },
   { id: "buy_plank", title: "🪚 Пачка досок (x6)", desc: "Готовые пиломатериалы для быстрой стройки.", price: 45, out: { plank: 6 } },
   { id: "buy_timber", title: "🧱 Комплект бруса (x4)", desc: "Профилированный брус для строительства домов.", price: 70, out: { timber: 4 } },
@@ -220,6 +229,31 @@ export function playSfx(type) {
       gain.gain.linearRampToValueAtTime(0.01, now + 0.2);
       osc.start(now);
       osc.stop(now + 0.2);
+    } else if (type === "dig") {
+      osc.type = "triangle";
+      osc.frequency.setValueAtTime(115, now);
+      osc.frequency.exponentialRampToValueAtTime(48, now + 0.16);
+      gain.gain.setValueAtTime(0.24, now);
+      gain.gain.linearRampToValueAtTime(0.01, now + 0.17);
+      osc.start(now);
+      osc.stop(now + 0.17);
+    } else if (type === "concrete") {
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(92, now);
+      osc.frequency.exponentialRampToValueAtTime(36, now + 0.19);
+      gain.gain.setValueAtTime(0.28, now);
+      gain.gain.linearRampToValueAtTime(0.01, now + 0.2);
+      osc.start(now);
+      osc.stop(now + 0.2);
+    } else if (type === "pry") {
+      osc.type = "sawtooth";
+      osc.frequency.setValueAtTime(310, now);
+      osc.frequency.linearRampToValueAtTime(470, now + 0.08);
+      osc.frequency.linearRampToValueAtTime(260, now + 0.15);
+      gain.gain.setValueAtTime(0.09, now);
+      gain.gain.linearRampToValueAtTime(0.008, now + 0.16);
+      osc.start(now);
+      osc.stop(now + 0.16);
     }
   } catch {}
 }
